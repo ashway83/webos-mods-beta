@@ -288,6 +288,15 @@ test_unchanged_new_and_removed_mods_pass_the_version_check() {
     assert_status 0 $?
 }
 
+test_a_change_outside_the_mods_passes_the_version_check() {
+    mod b 'version=1.0.0\n'
+    on_a_branch
+    echo "notes" >"$WORLD/repo/NOTES"
+    commit_all notes
+    check --base main
+    assert_status 0 $?
+}
+
 test_a_file_moved_between_mods_changes_both() {
     mod b 'version=1.0.0\n'
     mod c 'version=1.0.0\n'

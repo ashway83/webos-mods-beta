@@ -177,6 +177,7 @@ check_versions() {  # check_versions <git ref>: each mod whose files changed in 
     changed=$(git -C "$MODS" diff --no-renames --relative --name-only "$ref...HEAD" -- .) ||
         die "--base: can't compare with $ref (a shallow clone?)"
     while IFS= read -r name; do
+        [[ -n $name ]] || continue                   # nothing changed among the mods
         [[ -n ${VERSION_OF[$name]-} ]] || continue   # gone, or failed its checks
         old=$(git -C "$MODS" show "$ref:./$name/meta" 2>/dev/null | sed -n 's/^version=//p') || old=''
         [[ -n $old ]] || continue                    # new since <ref>
