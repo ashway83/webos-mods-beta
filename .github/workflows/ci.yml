@@ -62,6 +62,12 @@ jobs:
               echo "::error::gh-pages' newest commit doesn't name the commit it was published from"
               exit 1
             fi
+            # A newer push may have been published while this run waited: fetch it to compare
+            if ! git cat-file -e "$published^{commit}" 2>/dev/null &&
+                ! git fetch -q origin "$published" 2>/dev/null; then
+              echo "::error::the last published commit, $published, isn't in the repository's history"
+              exit 1
+            fi
             set -- --base "$published"
           fi
           # Signed with a throwaway key: a trial build is never published

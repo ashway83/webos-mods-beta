@@ -447,7 +447,10 @@ detail chosen without a question; change it freely.
   branch>` on a pull request and, on a push to `main`, `--base <the last published
   commit>`, which `gh-pages`' newest commit names (`Publish <sha>`; decided
   2026-10-13; until then the commit before the push, which forgot a failed check at the
-  next push). The maintainer may push directly (default). The publish job, after a push to `main`, publishes
+  next push). When runs overlap, that commit can be newer than the one being tested,
+  and missing from its clone: it's fetched, and the check then finds nothing
+  unpublished; one gone from the history (a force push) fails the step. The maintainer
+  may push directly (default). The publish job, after a push to `main`, publishes
   only main's current tip (default; a run for an older commit would leave out mods
   added since): it builds on a worktree of `gh-pages` (created as an orphan branch on
   the first run), replaces the branch's content with the output plus `.nojekyll`,
@@ -641,7 +644,8 @@ out again; what was planned or built, to pick up for 2.0:
   `list`, `search`, `update` and `remove hosts self` worked. The third run, the first
   version check against a published commit, found a bug in `tools/build-repo` (with
   no mod changed since the base, it read an empty name), fixed with a test; the
-  fourth passed, building on what was published. ECDSA signatures differ every time,
+  fourth passed, building on what was published. Two overlapping runs then showed the
+  published commit can be newer than the one tested (now fetched; see Step 5). ECDSA signatures differ every time,
   so each publish commits a new `index.sig`, even with no new version, and
   `gh-pages`' newest commit always names the last commit published. Before that, the
   steps' scripts ran locally against a bare repository standing in for GitHub, and the
