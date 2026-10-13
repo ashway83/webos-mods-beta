@@ -17,8 +17,13 @@ current: when a decision changes, update it here.
 - `mods/core/libmod.sh`: helpers shared by webos-mods, the boot hooks and mods.
 - `mods/core/install`, `mods/core/uninstall`: put the command on root's `PATH`, and
   take it off again (see core).
-- `mods/hosts/`: example mod; bind-mounts stock `/etc/hosts` + `blocklist` over
-  `/etc/hosts` (`MODS_HOSTS_FILE` retargets it for tests).
+- `mods/hosts/`: example mod; bind-mounts `/etc/hosts` as it finds it (stock, or
+  Homebrew Channel's copy when that blocks system updates) plus `blocklist` over
+  `/etc/hosts`, behind a marker line, and takes off only its own mount
+  (`MODS_HOSTS_FILE` retargets it for tests).
+- `CONTRIBUTING.md`: for mod authors: what a mod may do, checking a mod (with a
+  throwaway key, and on a TV), what reviewers check, how publishing works. `LICENSE`:
+  MIT, for the repository's own code; each mod states its own licence.
 - `.github/workflows/ci.yml`: on every pull request and push to `main`, shellcheck, both
   sides' tests, a trial build (the repo checks, and the version check), and core
   installed from it into a fake TV; after a push to `main`, publishes the repository to
@@ -397,7 +402,8 @@ detail chosen without a question; change it freely.
   committed as the branch's new content; working from what's published rather than the
   diff makes re-runs harmless; a `concurrency:` group serialises runs.
   CONTRIBUTING.md (what a mod may do, since its scripts run as root; what reviewers
-  check; version and licence rules; how publishing works) is written with this work.
+  check; version and licence rules; how publishing works) is written with this work
+  (done 2026-10-13; its rules on what a mod may do are drafts for the maintainer).
 - Core keeps the command (decided): core's semver describes `libmod.sh`'s helpers,
   the API mods use; a change only to the command, even a breaking one to its command
   line, is a minor or patch bump. Lockstep stays built in; the self-update means "a
@@ -438,9 +444,10 @@ detail chosen without a question; change it freely.
   to be among the mods, and `--url` is required (since 2026-10-13; until then a folder
   without core built a third-party repository). `ci.yml`'s test job (full history)
   runs shellcheck, both sides' tests and a trial build, with `--base origin/<base
-  branch>` on a pull
-  request and `--base <the commit before the push>` on a push to `main` (default: the
-  maintainer may push directly). The publish job, after a push to `main`, publishes
+  branch>` on a pull request and, on a push to `main`, `--base <the last published
+  commit>`, which `gh-pages`' newest commit names (`Publish <sha>`; decided
+  2026-10-13; until then the commit before the push, which forgot a failed check at the
+  next push). The maintainer may push directly (default). The publish job, after a push to `main`, publishes
   only main's current tip (default; a run for an older commit would leave out mods
   added since): it builds on a worktree of `gh-pages` (created as an orphan branch on
   the first run), replaces the branch's content with the output plus `.nojekyll`,
@@ -475,11 +482,9 @@ detail chosen without a question; change it freely.
     command still holds an `@PLACEHOLDER@`. No parse check of the stamped command:
     it's the unstamped one, already checked with shellcheck, plus two values that
     can't change its syntax once the URL is checked.
-  Revisit after the implementation:
-  - The version check on a push compares with the commit before it, so a change whose
-    check failed is forgotten by the next push and then skipped as "published already".
-    Comparing with the last published commit (the "Publish <sha>" message on
-    `gh-pages`) would keep it.
+  Done after the implementation (2026-10-13): the version check on a push compares
+  with the last published commit, not the commit before the push, which let a change
+  whose check failed be forgotten by the next push, then skipped as "published already".
   Left as is: archives taken over with `--from` aren't checked against the old index
   (they were checked when published).
 - Step 2 decisions (2026-10-13):
@@ -637,20 +642,30 @@ out again; what was planned or built, to pick up for 2.0:
   600, outside the repo) until it becomes the `publishing` environment's `SIGNING_KEY`
   (with deployment branches limited to `main`); then that file is deleted. A build
   signed with it was read by the shipped command on the TV, and refused once changed.
-- To do once this folder becomes a git repository: a `.gitignore` with `.DS_Store`,
-  before the first commit (decided 2026-10-13). Finder's files sit in `mods/` and
-  `mods/core/`; committed, every update to them would count as a change to core in the
-  version check, though archives leave them out.
+- Git (2026-10-13): this folder is a git repository, `main`, with a `.gitignore` for
+  `.DS_Store` (Finder's files would count as changes to the mods holding them); the
+  maintainer's test folders `out/` and `out2/` are kept out in `.git/info/exclude`.
+  Remote `beta`: `https://github.com/ashway83/webos-mods-beta` (public, as free-plan
+  Pages and environments need), to test CI, publishing and Pages before going live as
+  `webos-mods`; its `publishing` environment (main only) holds the official key, as
+  the live one will (decided 2026-10-13: the beta runs exactly what goes live).
 
 ## Open questions for the maintainer
 
 - Keep `MODS_WEBOS=unknown` (test-only) or drop it together with its three tests?
+  (Suggested 2026-10-13: keep; it's the only way the tests reach the unknown-webOS
+  branches of install, boot and search.)
 - `test_curl_reaches_github_over_https` checks the TV's curl and CA certificates rather
-  than our code; keep it?
+  than our code; keep it? (Suggested: keep, aimed at `github.io`, which the one-liner
+  and the command use.)
 - Mod repositories are decided (see "Planned: mod repositories"); steps 1 to 5 and 7
-  are done (2026-10-13); left: step 6 (CONTRIBUTING.md, folding the plan into the
-  sections above) and going live.
-- The `hosts` mod's `blocklist` is empty; it's only an example so far.
+  are done (2026-10-13), and CONTRIBUTING.md; left: folding the plan into the sections
+  above, and going live.
+- The `hosts` mod's `blocklist` is empty; it's only an example so far. Suggested
+  2026-10-13, to check against the TV's DNS traffic first: LG's ad servers
+  (`ad.lgsmartad.com`, `info.lgsmartad.com`, and their `us.`/`eu.` variants), telemetry
+  (`ngfts.lge.com`, `aic-ngfts.lge.com`), the viewing-data partner (`alphonso.tv`); not
+  the update servers, which Homebrew Channel blocks itself when asked to.
 
 ## Working with the maintainer
 

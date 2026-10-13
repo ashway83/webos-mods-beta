@@ -1,8 +1,8 @@
 ---
 # On every pull request and push to main: shellcheck, both sides' tests, and a trial
 # build of the repository, which checks the mods; it also checks that each mod whose
-# files changed has a higher version (against where a pull request branched off, or
-# what main was before a push). After a push to main, the repository is published:
+# files changed has a higher version (against where a pull request branched off, or on
+# a push, the last commit published). After a push to main, the repository is published:
 # built on top of the gh-pages branch, its index signed with the SIGNING_KEY secret of
 # the "publishing" environment (Settings > Environments: deployment branches main only),
 # and committed to gh-pages as its new content, which GitHub Pages serves (Settings >
@@ -49,13 +49,20 @@ jobs:
         run: tests/tools/run
 
       - name: Check the mods, with a trial build
-        env:
-          BEFORE: ${{ github.event.before }}
         run: |
+          # A pull request is checked against its base branch; a push to main against the
+          # last published commit, which gh-pages' newest commit names ("Publish <sha>"),
+          # so that a version check that failed keeps failing until it's fixed. Before the
+          # first publish, there's nothing to compare with
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             set -- --base "origin/$GITHUB_BASE_REF"
-          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
-            set -- --base "$BEFORE"   # not on the push that creates main
+          elif git fetch -q --depth=1 origin gh-pages 2>/dev/null; then
+            published=$(git log -1 --format=%s FETCH_HEAD | sed -n 's/^Publish \([0-9a-f]\{40\}\)$/\1/p')
+            if [ -z "$published" ]; then
+              echo "::error::gh-pages' newest commit doesn't name the commit it was published from"
+              exit 1
+            fi
+            set -- --base "$published"
           fi
           # Signed with a throwaway key: a trial build is never published
           openssl ecparam -name prime256v1 -genkey -noout -out "$RUNNER_TEMP/trial-key.pem"

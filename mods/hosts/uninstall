@@ -1,9 +1,9 @@
 #!/bin/ash
-# Undo boot: drop the bind mount and the stock file shows through again.
+# Undo boot: take off our own bind mount, when it's the one showing (its marker line is
+# there), and the file below shows through again: the stock one, or another mount, such
+# as Homebrew Channel's. A mount that isn't ours is left alone.
 # shellcheck shell=dash
 
-# shellcheck disable=SC1091
-. "${0%/*}/../core/libmod.sh"
-
 F=${MODS_HOSTS_FILE:-/etc/hosts}
-if is_mounted "$F"; then umount "$F"; fi
+MARK='# webos-mods: the hosts mod blocklist'
+if grep -qxF "$MARK" "$F"; then umount "$F"; fi
