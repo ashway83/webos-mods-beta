@@ -1,0 +1,4 @@
+version=1.0.0
+description=The webos-mods command, and the helpers that mods and their boot hooks share
+license=MIT
+homepage=https://github.com/ashway83/webos-mods

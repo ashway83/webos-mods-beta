@@ -1,0 +1,174 @@
+---
+# On every pull request and push to main: shellcheck, both sides' tests, and a trial
+# build of the repository, which checks the mods; it also checks that each mod whose
+# files changed has a higher version (against where a pull request branched off, or
+# what main was before a push). After a push to main, the repository is published:
+# built on top of the gh-pages branch, its index signed with the SIGNING_KEY secret of
+# the "publishing" environment (Settings > Environments: deployment branches main only),
+# and committed to gh-pages as its new content, which GitHub Pages serves (Settings >
+# Pages: deploy from a branch, gh-pages). A git tag, v<version>, marks each published
+# core version.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+
+env:
+  # Where GitHub Pages serves gh-pages, stamped into core's command (a fork's into its own)
+  REPOSITORY_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the version check compares with older commits
+
+      - name: Shellcheck
+        run: |
+          shopt -s nullglob
+          shellcheck mods/core/bin/webos-mods mods/*/libmod.sh mods/*/install mods/*/boot \
+            mods/*/uninstall tests/main/*.sh tests/main/run tests/tools/*.sh tests/tools/run tools/*
+
+      - name: TV-side tests under busybox ash
+        run: |
+          # sh, sed, grep, sort, tar... all from busybox, like on the TV
+          sudo apt-get update -q && sudo apt-get install -y -q busybox
+          # scripts that run on the TV start with #!/bin/ash, as the TV has it; Ubuntu doesn't
+          [ -e /bin/ash ] || sudo ln -s "$(command -v busybox)" /bin/ash
+          mkdir -p /tmp/bb
+          for applet in $(busybox --list); do ln -sf "$(command -v busybox)" "/tmp/bb/$applet"; done
+          sudo env PATH="/tmp/bb:$PATH" tests/main/run
+
+      - name: Build-side tests
+        run: tests/tools/run
+
+      - name: Check the mods, with a trial build
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            set -- --base "origin/$GITHUB_BASE_REF"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            set -- --base "$BEFORE"   # not on the push that creates main
+          fi
+          # Signed with a throwaway key: a trial build is never published
+          openssl ecparam -name prime256v1 -genkey -noout -out "$RUNNER_TEMP/trial-key.pem"
+          tools/build-repo "$@" --url "$REPOSITORY_URL" --key "$RUNNER_TEMP/trial-key.pem" \
+            mods "$RUNNER_TEMP/repository"
+
+      - name: Install core from the trial build, in a fake TV
+        run: |
+          # The command as published (stamped by tools/build-repo) reads the trial build's
+          # index and archives the way a TV would: every mod's stanza is parsed, and core is
+          # downloaded, checked and installed. No mod's scripts run but core's, which writes
+          # into the fake TV; any warning, such as a stanza left out, fails the step. Its
+          # copy here trusts the trial key instead of the official one, which only the
+          # publish job has (as the trust helper in tests/main/helpers.sh does)
+          repo=$RUNNER_TEMP/repository
+          tv=$RUNNER_TEMP/tv
+          mkdir -p "$tv/hbc"
+          openssl pkey -in "$RUNNER_TEMP/trial-key.pem" -pubout -out "$tv/trial-key.pub"
+          awk -v keys="$tv/trial-key.pub" -v q="'" '
+            $0 == "KEYS=" q { print; while ((getline line < keys) > 0) print line; skip = 1; next }
+            skip && $0 == q { skip = 0 }
+            !skip { print }' "$repo/webos-mods" >"$tv/webos-mods"
+          if ! sudo env PATH="/tmp/bb:$PATH" MODS_REPOSITORY="file://$repo" MODS_PREFIX="$tv/mods" \
+              MODS_INITD="$tv/hbc/init.d" MODS_PROFILE="$tv/profile" \
+              busybox sh "$tv/webos-mods" install core >"$tv/out" 2>&1; then
+            cat "$tv/out"
+            exit 1
+          fi
+          cat "$tv/out"
+          if grep -q '^!! ' "$tv/out"; then echo "::error::installing core from the trial build warned"; exit 1; fi
+          test -x "$tv/mods/core/bin/webos-mods"
+
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: publishing # its SIGNING_KEY secret, for main only
+    permissions:
+      contents: write
+    concurrency:
+      group: publish # one at a time, each on top of the last
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build on top of gh-pages
+        id: build
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          # Only main's tip: a run for an older commit would leave out mods added since
+          git fetch -q origin main
+          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then
+            echo "main has moved on from $GITHUB_SHA; the newer commit's run publishes"
+            echo "skip=1" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::the publishing environment has no SIGNING_KEY secret"
+            exit 1
+          fi
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" >"$RUNNER_TEMP/signing-key.pem")
+          pages=$RUNNER_TEMP/gh-pages
+          found=0
+          git ls-remote --exit-code --heads origin gh-pages >/dev/null || found=$?
+          case $found in
+            0) git fetch -q --depth=1 origin gh-pages && git worktree add -q --detach "$pages" FETCH_HEAD ;;
+            2) git worktree add -q --orphan -b gh-pages "$pages" ;;   # the first publish
+            *) exit "$found" ;;
+          esac
+          tools/build-repo --from "$pages" --url "$REPOSITORY_URL" --key "$RUNNER_TEMP/signing-key.pem" \
+            mods "$RUNNER_TEMP/repository"
+          rm -f "$RUNNER_TEMP/signing-key.pem"
+
+      - name: Check that the published command accepts the new index
+        if: steps.build.outputs.skip != '1'
+        run: |
+          # The newest published webos-mods, which the one-liner hands out, checks the new
+          # index's signature with the key written in it, as every TV does: a signing key
+          # it doesn't trust stops the publish here, before anything is pushed
+          sudo apt-get update -q && sudo apt-get install -y -q busybox
+          [ -e /bin/ash ] || sudo ln -s "$(command -v busybox)" /bin/ash
+          mkdir -p /tmp/bb
+          for applet in $(busybox --list); do ln -sf "$(command -v busybox)" "/tmp/bb/$applet"; done
+          repo=$RUNNER_TEMP/repository
+          tv=$RUNNER_TEMP/tv
+          mkdir -p "$tv/hbc"
+          sudo env PATH="/tmp/bb:$PATH" MODS_REPOSITORY="file://$repo" MODS_PREFIX="$tv/mods" \
+            MODS_INITD="$tv/hbc/init.d" MODS_PROFILE="$tv/profile" busybox sh "$repo/webos-mods" search
+
+      - name: Publish to gh-pages
+        if: steps.build.outputs.skip != '1'
+        run: |
+          pages=$RUNNER_TEMP/gh-pages
+          git -C "$pages" rm -rq --ignore-unmatch -- .
+          cp -Rp "$RUNNER_TEMP/repository/." "$pages/"
+          touch "$pages/.nojekyll"   # Pages serves the files as they are, without Jekyll
+          git -C "$pages" add -A
+          if git -C "$pages" diff --cached --quiet; then
+            echo "nothing new to publish"
+          else
+            git -C "$pages" -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "Publish $GITHUB_SHA"
+            git -C "$pages" push -q origin HEAD:gh-pages
+          fi
+
+      - name: Tag the published core version
+        if: steps.build.outputs.skip != '1'
+        run: |
+          version=$(sed -n 's/^version=//p' mods/core/meta)
+          if ! git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            git tag "v$version" "$GITHUB_SHA"
+            git push -q origin "refs/tags/v$version"
+            echo "tagged v$version"
+          fi

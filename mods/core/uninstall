@@ -1,0 +1,25 @@
+#!/bin/ash
+#
+# core/uninstall - takes the webos-mods command off root's PATH when core is removed
+# (uninstall remove): deletes the line core/install added to ~/.profile. On an update,
+# the line stays and the new core's install rewrites it. MODS_PROFILE replaces
+# ~/.profile (tests).
+#
+# Copyright (c) 2026 Andriy Sharandakov
+#
+# This script is licensed under the MIT License.
+# See the LICENSE file for details.
+#
+# GitHub: https://github.com/ashway83/webos-mods
+#
+# shellcheck shell=dash
+
+profile=${MODS_PROFILE:-${HOME:-/home/root}/.profile}
+mark='  # webos-mods'
+if [ "${1:-}" != remove ] || [ ! -f "$profile" ]; then exit 0; fi
+rm -f "$profile.webos-mods"
+grep -v "$mark\$" "$profile" >"$profile.webos-mods"   # fails if no other line is left; fine
+if [ ! -f "$profile.webos-mods" ] || ! cat "$profile.webos-mods" >"$profile"; then
+    echo "!! couldn't take webos-mods off PATH in $profile" >&2
+fi
+rm -f "$profile.webos-mods"

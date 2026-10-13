@@ -1,0 +1,45 @@
+#!/bin/ash
+#
+# Runs the TV side's test suites in order, each in its own shell, as root (on the TV,
+# or in CI under busybox):
+#   tests/main/run              every suite
+#   tests/main/run boot hosts   only suites whose names contain one of these words
+# The build side's suites (the repository builder and its checks) have their own
+# runner, tests/tools/run.
+# shUnit2 2.1.8 ships with the repo as tests/shunit2, unmodified.
+# On the TV, from a copy of the repo (the tests only write under /tmp). Run this in the
+# folder holding webos-mods; the first line leaves out macOS metadata busybox tar warns about:
+#   COPYFILE_DISABLE=1 tar --no-xattrs --exclude .DS_Store --exclude .git -cf - webos-mods |
+#       ssh root@TV 'tar -xf - -C /tmp && /tmp/webos-mods/tests/main/run'
+# MODS_TEST_OFFLINE=1 skips the check that needs internet access.
+#
+# Copyright (c) 2026 Andriy Sharandakov
+#
+# This script is licensed under the MIT License.
+# See the LICENSE file for details.
+#
+# GitHub: https://github.com/ashway83/webos-mods
+#
+# shellcheck shell=dash
+
+cd "$(dirname "$0")" || exit 2
+echo "shell: $(readlink /bin/sh 2>/dev/null || echo /bin/sh)  $(busybox 2>/dev/null | head -n 1)"
+failed=
+for suite in [0-9][0-9]_*_test.sh; do
+    if [ $# -gt 0 ]; then
+        match=
+        for word in "$@"; do
+            case $suite in *"$word"*) match=1 ;; esac
+        done
+        [ -n "$match" ] || continue
+    fi
+    echo
+    echo "=== $suite"
+    sh "$suite" || failed="$failed $suite"
+done
+echo
+if [ -n "$failed" ]; then
+    echo "FAILED:$failed"
+    exit 1
+fi
+echo "all suites passed"

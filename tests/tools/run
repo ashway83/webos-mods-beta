@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# Runs the build side's test suites in order, each in its own bash: what runs in CI and
+# on developer machines, never on a TV (the repository builder and its checks). No root
+# needed.
+#   tests/tools/run              every suite
+#   tests/tools/run repository   only suites whose names contain one of these words
+# Needs bash 4 or later, GNU tar (as tar or gtar), git and shellcheck (on a Mac: brew
+# install bash gnu-tar shellcheck). The TV side's suites have their own runner,
+# tests/main/run.
+#
+# Copyright (c) 2026 Andriy Sharandakov
+#
+# This script is licensed under the MIT License.
+# See the LICENSE file for details.
+#
+# GitHub: https://github.com/ashway83/webos-mods
+
+set -euo pipefail
+
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "!! needs bash 4 or later (on a Mac: brew install bash)" >&2
+    exit 2
+fi
+tar=''
+for name in gtar tar; do
+    if "$name" --version 2>/dev/null | grep -q 'GNU tar'; then tar=$name; break; fi
+done
+if [[ -z $tar ]]; then
+    echo "!! needs GNU tar, as tar or gtar (on a Mac: brew install gnu-tar)" >&2
+    exit 2
+fi
+if ! command -v git >/dev/null; then
+    echo "!! needs git" >&2
+    exit 2
+fi
+if ! command -v shellcheck >/dev/null; then
+    echo "!! needs shellcheck (on a Mac: brew install shellcheck)" >&2
+    exit 2
+fi
+if ! command -v openssl >/dev/null; then
+    echo "!! needs openssl" >&2
+    exit 2
+fi
+cd "$(dirname "$0")" || exit 2
+echo "bash $BASH_VERSION, $("$tar" --version | head -n 1), $(git --version)," \
+    "shellcheck $(shellcheck --version | sed -n 's/^version: //p'), $(openssl version)"
+failed=()
+for suite in [0-9][0-9]_*_test.sh; do
+    if (( $# )); then
+        match=''
+        for word in "$@"; do
+            if [[ $suite == *"$word"* ]]; then match=1; fi
+        done
+        [[ -n $match ]] || continue
+    fi
+    echo
+    echo "=== $suite"
+    bash "$suite" || failed+=("$suite")
+done
+echo
+if (( ${#failed[@]} )); then
+    echo "FAILED: ${failed[*]}"
+    exit 1
+fi
+echo "all suites passed"

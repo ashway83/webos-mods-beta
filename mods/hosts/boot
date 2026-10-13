@@ -1,0 +1,12 @@
+#!/bin/ash
+# Overlay the read-only /etc/hosts with the stock entries plus our blocklist.
+# Runs at every boot (and once at install). Keep it quick and idempotent.
+# MODS_HOSTS_FILE points it at another file (the tests use that).
+# shellcheck shell=dash
+D=${0%/*}
+F=${MODS_HOSTS_FILE:-/etc/hosts}
+# shellcheck disable=SC1091
+. "$D/../core/libmod.sh"
+is_mounted "$F" && exit 0                        # already applied this boot
+{ cat "$F"; echo; cat "$D/blocklist"; } >"$D/hosts"
+mount -o bind "$D/hosts" "$F"

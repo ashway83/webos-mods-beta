@@ -1,0 +1,21 @@
+version=1.0.0
+description=Adds a blocklist to /etc/hosts, by bind-mounting a merged copy over it
+license=MIT
+keywords=hosts,dns,blocklist,ads
+homepage=https://github.com/ashway83/webos-mods
+boot_order=50
+dependencies.core=^1.0.0
+# package.json-style keys, one per line. version is required, and to publish, a
+# description and a license:
+#   version=MAJOR.MINOR.PATCH
+#   description=<one line>           what the mod does; search and info show it
+#   license=<SPDX expression>        e.g. MIT, or MIT AND GPL-2.0-only for bundled parts
+#   keywords=<word>,<word>           for search; letters, digits, - and _
+#   homepage=https://...             author=<name>
+#   dependencies.<mod>=<npm range>   e.g. dependencies.foo=^1.2.0. Core is implied with any
+#                                    version; declare a range if you use its helpers (as here)
+#   engines.webos=<npm range>        TV versions it supports, in LG's internal numbering:
+#                                    webOS 4.5 = 4.5-4.9, webOS 22 = 7.x, 23 = 8.x, 24 = 9.x
+#   boot_order=NN                    prefix of its Homebrew Channel hook (default 50); hooks
+#                                    start in name order, so start after your dependencies
+#engines.webos=>=4.0

@@ -1,0 +1,29 @@
+#!/bin/ash
+#
+# core/install - puts the webos-mods command on root's PATH: one marked line at the end
+# of ~/.profile (after any PATH the file sets itself), replacing an earlier one. Runs on
+# a fresh install and on every update of core; login shells pick the line up. If the
+# file can't be written, it only warns: mods don't depend on the line.
+# MODS_PROFILE replaces ~/.profile (tests).
+#
+# Copyright (c) 2026 Andriy Sharandakov
+#
+# This script is licensed under the MIT License.
+# See the LICENSE file for details.
+#
+# GitHub: https://github.com/ashway83/webos-mods
+#
+# shellcheck shell=dash
+
+profile=${MODS_PROFILE:-${HOME:-/home/root}/.profile}
+bin=$(cd "${0%/*}" && pwd)/bin
+mark='  # webos-mods'
+rm -f "$profile.webos-mods"
+{
+    if [ -f "$profile" ]; then grep -v "$mark\$" "$profile"; fi
+    echo "PATH=\"\$PATH:$bin\"$mark"
+} >"$profile.webos-mods"
+if [ ! -f "$profile.webos-mods" ] || ! cat "$profile.webos-mods" >"$profile"; then
+    echo "!! couldn't put webos-mods on PATH in $profile; run it as $bin/webos-mods" >&2
+fi
+rm -f "$profile.webos-mods"

@@ -1,0 +1,2 @@
+# Appended to the stock /etc/hosts at boot. One entry per line, e.g.:
+# 0.0.0.0 ads.example.com

@@ -1,0 +1,972 @@
+#!/bin/ash
+#
+# webos-mods - installs, updates and removes mods on a rooted LG webOS TV (Homebrew
+# Channel). The first time, pipe it from the official repository:
+#
+#   curl -fsSL https://ashway83.github.io/webos-mods/webos-mods | sh -s -- install hosts
+#
+# That also installs it as the command webos-mods (it ships in core), so afterwards:
+#
+#   webos-mods install <mod>...     install, or update if a newer version suits
+#   webos-mods reinstall <mod>...   same, but even if up to date (repair/reset)
+#   webos-mods remove <mod>...      run uninstall scripts and delete (no download)
+#   webos-mods update [<mod>...]    update installed mods (all if none named)
+#   webos-mods list                 show this command's version, the TV's webOS and the mods
+#   webos-mods search [<word>]      show the mods available, or those matching a word
+#   webos-mods info <mod>           show a mod's details and versions
+#   webos-mods help                 show the commands
+#
+# "self" stands for core, which holds this command: update self, remove self. Core stays
+# when the last mod goes, until it's removed itself.
+#
+# Mods come from a repository: a folder served over https:// (or file://) holding an
+# index, a stanza per mod version, and each version's <mod>-<version>.tar.gz. The
+# official repository's URL is stamped in below when it's published; MODS_REPOSITORY
+# replaces it (a mirror, tests). Every run that reads the repository fetches its index
+# afresh, and uses nothing in it unless its signature (index.sig, made in CI) verifies
+# with the public key below (openssl); the index's sha256s then vouch for the archives.
+# A run that can't verify it stops, and says why. Signatures don't expire: whoever
+# serves an old index can only withhold updates, as nothing is ever downgraded.
+#
+# A mod's meta follows package.json conventions in key=value form:
+#   version=1.2.0                 dependencies.hosts=^1.0.0
+#   engines.webos=>=4.5 <8        boot_order=60
+# Ranges use npm's syntax. Dependencies are checked here, at install time only. Every
+# mod in a run starts at its newest version that suits the TV's webOS, never below its
+# installed one. Then, until nothing changes, a version steps down to the next older one
+# where another mod's range refuses it (a dependency before its dependent) or its own
+# dependencies won't be met. A mod that runs out of versions is held back: an installed
+# copy stays, a new mod isn't installed. The output says why a newer version didn't go
+# in. Mods with a boot script get a Homebrew Channel hook,
+# /var/lib/webosbrew/init.d/<boot_order>-mod-<name>, which only starts the mod if the
+# TV's webOS is within its engines.webos.
+#
+# core holds the shared helpers and follows semver, so a new major version may
+# drop or change them; mods that use them declare e.g. dependencies.core=^1.0.0,
+# and every mod depends on core implicitly. A mod with no core range accepts any
+# core: it normally works, but a backward-incompatible core can break it, its boot
+# hook included (the hook calls core's run_boot). This program only ever works
+# with its own version of core: it installs it first, and stops before changing
+# anything if an installed mod needs another one. The installed command, though,
+# chooses core's version like any mod's when it installs or updates (see below).
+#
+# A mod's optional install and uninstall scripts take care of anything outside its
+# folder; this program deletes the folder and hook itself. Mods go in after the mods
+# they depend on (dep_order), and come out before them:
+#   fresh install   install install, then boot
+#   update          old uninstall update <new version>, new install update <old version>, boot
+#   removal         uninstall remove
+# If install fails, the attempt is undone: uninstall remove for a fresh install;
+# for an update, the new version's uninstall update <old>, then the old version is
+# put back with install update <new> and started again. Mods that needed the failed
+# one are skipped, and the run exits with an error.
+#
+# install changes only the mods you name and the dependencies they need; update
+# brings the installed mods (all, or the ones named) up to date. A mod is up to date
+# when the version chosen is the one installed: published versions never change.
+# Everything is downloaded, checked against the index's sha256, and
+# looked through (an archive holds only its mod's folder) before anything changes.
+# MODS_WEBOS=x.y.z overrides the detected webOS version, and MODS_WEBOS=unknown makes
+# it unreadable (core's webos_version).
+#
+# When it installs or updates, the installed command updates itself: core's version is
+# chosen like any mod's, never below this copy's own, so it's the newest that every
+# installed mod accepts at the version it will have after the run (mods not installed
+# yet are skipped rather than holding core back). If that's newer than this copy, that
+# core is downloaded and checked like any mod, and its webos-mods runs instead, with
+# the same command; if it can't be had, this copy says so and carries on with its own
+# core. MODS_NO_SELFUPDATE=1 keeps to this copy. The other commands run the installed
+# copy, which matches the installed core. A piped copy never updates itself.
+#
+# Publishing stamps REPOSITORY and VERSION (core's) below. MODS_PREFIX moves the mods
+# dir, for every run (an absolute path; default /media/developer/mods), and MODS_INITD
+# the hook dir; the directory holding init.d is taken to be Homebrew Channel's.
+# MODS_PROFILE replaces root's ~/.profile, where core's install script puts the command
+# on PATH (tests). One run at a time changes a mods dir: the others stop, and list,
+# search and info don't wait. A run that died (no such process, or one from before a
+# reboot) leaves a lock that the next run takes over.
+# All logic lives in functions and main() is called on the very last line,
+# so a truncated download executes nothing. Written for busybox ash (POSIX sh
+# plus `local`), like core/libmod.sh.
+#
+# Copyright (c) 2026 Andriy Sharandakov
+#
+# This script is licensed under the MIT License.
+# See the LICENSE file for details.
+#
+# GitHub: https://github.com/ashway83/webos-mods
+#
+# shellcheck shell=dash
+
+set -eu
+
+REPOSITORY='@REPOSITORY@'
+VERSION='@VERSION@'
+# The public key the official repository's index is signed with (ECDSA P-256; its
+# private key is CI's). During a key change this holds the new key too, a PEM block each
+KEYS='
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfSjOVnng51+fTPGGpa47K8G8djJV
+7tiIfR7+Ldb9LsFiPRBlMayLFWxoIO+ObFFmpkMkecZ4tByUvUrC8iGiKQ==
+-----END PUBLIC KEY-----
+'
+INITD=${MODS_INITD:-/var/lib/webosbrew/init.d}   # Homebrew Channel runs these at boot, in name order
+PREFIX=                                          # the mods dir, set by main
+TMP='' LOCK=''                                   # this run's temp dir and its lock on the mods dir
+REPO=''                                          # the repository's URL, set by main
+SELFUPDATE=''                                    # 1: this run may switch to a newer core's command
+RUN=' ' PLAN=' ' WANTED=' ' FORCE=' ' SKIPPED=' ' FAILED=
+
+log() { echo ">> $*"; }
+warn() { echo "!! $*" >&2; }
+die() { warn "$*"; exit 1; }
+
+usage() {  # the commands, for help
+    cat <<EOF
+webos-mods $VERSION: mods for a rooted LG webOS TV
+usage: webos-mods <command> [<mod>...]
+  install <mod>...     install mods, or update them if a newer version suits
+  reinstall <mod>...   install them again, even if up to date
+  remove <mod>...      run their uninstall scripts and delete them
+  update [<mod>...]    update installed mods (all if none are named)
+  list                 show this version, the TV's webOS and the installed mods
+  search [<word>]      show the mods available (all, or those whose name,
+                       description or keywords hold the word)
+  info <mod>           show a mod's details and every version available
+  help                 show this help
+"self" stands for core, which holds webos-mods itself: update self, remove self.
+EOF
+}
+
+has() {  # has <set> <word>: word is in the space-delimited set
+    case $1 in *" $2 "*) return 0 ;; esac
+    return 1
+}
+
+check_name() {  # names become directory and hook names; keep them to [A-Za-z0-9_-]
+    case $1 in
+        '' | *[!A-Za-z0-9_-]*) die "invalid mod name: '$1'" ;;
+        self) die "invalid mod name: 'self' stands for core" ;;
+    esac
+}
+
+repository() {  # repository: the repository's URL: MODS_REPOSITORY, or the official one
+                # stamped in (none in an unpublished copy)
+    local url="${MODS_REPOSITORY:-}"
+    if [ -z "$url" ]; then
+        case $REPOSITORY in @*) ;; *) url=$REPOSITORY ;; esac
+    fi
+    case $url in
+        '') ;;
+        *[!A-Za-z0-9._~:/%+@-]*) die "the repository URL may only hold letters, digits and . _ ~ : / % + @ -: $url" ;;
+        https://?* | file://?*) echo "${url%/}" ;;
+        *) die "the repository URL must start with https:// or file://: $url" ;;
+    esac
+}
+
+own_core() {  # own_core: the core this copy came with, if it's the installed command
+              # (core/bin/webos-mods next to core's install record, maybe through a
+              # symlink), not a piped copy
+    local file='' dir=''
+    file=$(readlink -f "$0" 2>/dev/null) || return 0
+    [ "${file##*/}" = webos-mods ] || return 0
+    dir=${file%/*}
+    case $dir in
+        */core/bin) if [ -f "${dir%/bin}/.installed" ]; then echo "${dir%/bin}"; fi ;;
+    esac
+}
+
+lock() {  # lock: hold the mods dir's lock, so that no other run changes it meanwhile. The
+          # lock names this run's pid and boot; one whose run is gone (no such process,
+          # or from before a reboot) is taken over. A lock without a name yet belongs to
+          # a run that's just starting
+    local this_boot='' pid='' boot=''
+    this_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || :)
+    mkdir -p "$PREFIX"
+    if ! mkdir "$PREFIX/.lock" 2>/dev/null; then
+        { read -r pid boot <"$PREFIX/.lock/holder"; } 2>/dev/null || :
+        if [ -z "$pid" ]; then
+            die "another webos-mods run is starting on $PREFIX; if none is, remove $PREFIX/.lock"
+        fi
+        if [ "$boot" = "$this_boot" ] && kill -0 "$pid" 2>/dev/null; then
+            die "another webos-mods run (pid $pid) is changing $PREFIX; try again once it's done"
+        fi
+        warn "taking over $PREFIX/.lock from a webos-mods run that's gone (pid $pid)"
+        rm -rf "$PREFIX/.lock"
+        mkdir "$PREFIX/.lock" 2>/dev/null || die "another webos-mods run took $PREFIX/.lock just now"
+    fi
+    LOCK=$PREFIX/.lock
+    echo "$$ $this_boot" >"$LOCK/holder"
+}
+
+cleanup() {  # on exit: drop the temp dir, and the lock with the mods dir if that's empty
+    if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
+    if [ -n "$LOCK" ]; then rm -rf "$LOCK"; rmdir "$PREFIX" 2>/dev/null || :; fi
+}
+
+download() {  # download <url> <file>
+    curl -fsSL --retry 3 --connect-timeout 15 --speed-time 30 --speed-limit 1 -o "$2" "$1"
+}
+
+read_repository() {  # read_repository: fetch the repository's index, check its signature, and
+                     # lay out each mod version it lists as $TMP/repo/mods/<mod>/<version>/<mod>/meta,
+                     # its stanza (the mod's meta lines, name, file, sha256). Stops the run if
+                     # the index can't be read or verified, or is of another format
+    local first=''
+    mkdir -p "$TMP/repo/mods"
+    download "$REPO/index" "$TMP/repo/index" || die "couldn't read $REPO/index"
+    verify_index
+    first=$(head -n 1 "$TMP/repo/index")
+    case $first in
+        format=1) ;;
+        format=*) die "$REPO uses index format ${first#format=}; update webos-mods" ;;
+        *) die "$REPO/index isn't a webos-mods index" ;;
+    esac
+    split_index "$TMP/repo"
+}
+
+verify_index() {  # verify_index: stop the run unless one of the signatures in index.sig (base64,
+                  # one a line) verifies the index with one of the KEYS. Several of either
+                  # let a key change overlap: old copies keep trusting the old key's line
+    local why="can't verify the signature of $REPO/index" key='' line=''
+    command -v openssl >/dev/null || die "$why: openssl not found"
+    download "$REPO/index.sig" "$TMP/repo/index.sig" || die "$why: couldn't download index.sig"
+    printf '%s\n' "$KEYS" | awk -v dir="$TMP" '/^-----BEGIN PUBLIC KEY-----$/ { n++ } n { print > (dir "/key." n ".pem") }'
+    for key in "$TMP"/key.*.pem; do
+        while IFS= read -r line || [ -n "$line" ]; do
+            if printf '%s' "$line" | openssl base64 -d -A >"$TMP/signature" 2>/dev/null &&
+                openssl dgst -sha256 -verify "$key" -signature "$TMP/signature" "$TMP/repo/index" >/dev/null 2>&1; then
+                return 0
+            fi
+        done <"$TMP/repo/index.sig"
+    done
+    die "$why: it's invalid, or made with another key"
+}
+
+split_index() {  # split_index <dir>: a folder per mod version <dir>/index lists, holding the
+                 # version's stanza as meta. Stanzas whose name, version or dependency names
+                 # aren't valid are left out, with a warning
+    # shellcheck disable=SC2016 # an awk program: its $ fields are awk's
+    local program='
+        BEGIN { RS = "" }
+        NR == 1 { next }                    # format=1
+        {
+            n = split($0, line, "\n"); name = ""; version = ""; bad = 0
+            for (i = 1; i <= n; i++) {
+                if (line[i] ~ /^name=/) name = substr(line[i], 6)
+                else if (line[i] ~ /^version=/) version = substr(line[i], 9)
+                else if (line[i] ~ /^dependencies\./ && line[i] !~ /^dependencies\.[A-Za-z0-9_-]+=/) bad = 1
+            }
+            if (name !~ /^[A-Za-z0-9_-]+$/ || name == "self" || version !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ || bad) {
+                if (mode == "folders") print "!" name " " version
+                next
+            }
+            if (mode == "folders") { print name "/" version "/" name; next }
+            meta = dir "/mods/" name "/" version "/" name "/meta"
+            for (i = 1; i <= n; i++) print line[i] > meta
+            close(meta)
+        }'
+    local line=''
+    awk -v mode=folders "$program" "$1/index" >"$1/stanzas"
+    while IFS= read -r line; do
+        case $line in
+            !*) warn "$REPO: leaving out a stanza with an invalid name, version or dependency (${line#!})" ;;
+            *) mkdir -p "$1/mods/$line" ;;
+        esac
+    done <"$1/stanzas"
+    awk -v mode=files -v dir="$1" "$program" "$1/index"
+}
+
+listed() {  # listed <mod> [<version>]: the repository lists <mod> (at that version)
+    [ -d "$TMP/repo/mods/$1${2:+/$2}" ]
+}
+
+versions_of() {  # versions_of <mod>: the versions the repository lists, newest first
+    # shellcheck disable=SC2012 # folder names are versions, checked when the index was read
+    ls "$TMP/repo/mods/$1" | sort -t. -k1,1nr -k2,2nr -k3,3nr
+}
+
+stanza() {  # stanza <mod> <version>: the folder holding that version's stanza, as meta
+    echo "$TMP/repo/mods/$1/$2/$1"
+}
+
+suits_tv() {  # suits_tv <mod> <version>: that version suits this TV's webOS, as install takes
+              # it: it has no engines.webos, or one that holds the TV's known version
+    local range=''
+    range=$(meta "$(stanza "$1" "$2")" 'engines\.webos')
+    [ -z "$range" ] || { [ -n "$WEBOS" ] && satisfies "$WEBOS" "$range"; }
+}
+
+for_tv() {  # for_tv <mod>: its newest listed version that suits this TV's webOS, if any
+    local version=''
+    for version in $(versions_of "$1"); do
+        if suits_tv "$1" "$version"; then echo "$version"; return 0; fi
+    done
+}
+
+installed_version() {  # installed_version <mod>
+    if [ -d "$PREFIX/$1" ]; then meta "$PREFIX/$1" version; fi
+}
+
+plan_mod() {  # plan_mod <mod>: put <mod> in the run at its newest version that suits this TV:
+              # not below its installed one, and for core this command's own (main plans
+              # it here only when that's the installed one), or a newer one if this run may
+              # switch to a newer core's command (SELFUPDATE). Versions too new for the TV's
+              # webOS are passed over, the newest's reason kept. Fails if there's no version
+              # to take
+    local state="$TMP/plan/$1" installed='' version='' range='' vc=''
+    if [ -d "$state" ]; then   # back in the run: as it was, never higher
+        if [ -s "$state/version" ]; then RUN="$RUN$1 "; return 0; fi
+        return 1
+    fi
+    mkdir -p "$state"
+    : >"$state/cands"
+    installed=$(installed_version "$1")
+    if listed "$1"; then
+        for version in $(versions_of "$1"); do
+            if [ "$1" = core ] && [ "$VERSION" != dev ] && [ -z "$SELFUPDATE" ] && [ "$version" != "$VERSION" ]; then
+                continue
+            fi
+            if [ -n "$installed" ]; then
+                _vcmp "$version" "$installed"
+                if [ "$vc" -lt 0 ]; then break; fi
+            fi
+            if [ ! -f "$state/newest" ]; then echo "$version" >"$state/newest"; fi
+            range=$(meta "$(stanza "$1" "$version")" 'engines\.webos')
+            if [ -n "$range" ] && [ -z "$WEBOS" ]; then
+                if [ ! -f "$state/why" ]; then echo "it needs webOS $range, and this TV's version is unknown" >"$state/why"; fi
+                continue
+            elif [ -n "$range" ] && ! satisfies "$WEBOS" "$range"; then
+                if [ ! -f "$state/why" ]; then echo "it needs webOS $range, this TV has $WEBOS" >"$state/why"; fi
+                continue
+            fi
+            echo "$version" >>"$state/cands"
+            if [ "$version" = "$installed" ]; then break; fi
+        done
+    fi
+    if [ -n "$installed" ]; then   # the floor: an installed mod stays as it is
+        if [ ! -f "$state/newest" ]; then echo "$installed" >"$state/newest"; fi
+        if ! grep -qx "$installed" "$state/cands"; then echo "$installed" >>"$state/cands"; fi
+    fi
+    version=$(head -n 1 "$state/cands")
+    tail -n +2 "$state/cands" >"$state/rest" && mv "$state/rest" "$state/cands"
+    echo "$version" >"$state/version"
+    if [ -z "$version" ]; then return 1; fi
+    RUN="$RUN$1 "
+}
+
+planned() { cat "$TMP/plan/$1/version" 2>/dev/null || :; }   # planned <mod>: its version in the run
+
+changing() {  # changing <mod>: this run puts a version of <mod> in place (new, newer, or forced)
+    has "$RUN" "$1" || return 1
+    [ "$(planned "$1")" != "$(installed_version "$1")" ] || has "$FORCE" "$1"
+}
+
+in_place() {  # in_place <mod>: the folder of the version of <mod> in use after this run: the
+              # planned one (staged, once downloaded), or the installed one if it suits the
+              # TV's webOS; none if neither
+    if changing "$1"; then
+        if [ -d "$TMP/stage/$1" ]; then echo "$TMP/stage/$1"; return 0; fi
+        stanza "$1" "$(planned "$1")"
+    elif [ -d "$PREFIX/$1" ] && webos_ok "$PREFIX/$1" "$WEBOS"; then
+        echo "$PREFIX/$1"
+    fi
+}
+
+needs_unmet() {  # needs_unmet <mod>: why its planned version's dependencies won't be met, if so
+    local dir='' dep='' dep_dir='' range=''
+    dir=$(in_place "$1")
+    for dep in $(dep_names "$dir"); do
+        dep_dir=$(in_place "$dep")
+        range=$(dep_range "$dir" "$dep")
+        if [ -z "$dep_dir" ]; then echo "it needs $dep, which isn't available"; return; fi
+        if ! satisfies "$(meta "$dep_dir" version)" "$range"; then
+            echo "it needs $dep@$range, but $dep would be $(meta "$dep_dir" version)"; return
+        fi
+    done
+}
+
+rejected_by() {  # rejected_by <mod>: which mod would refuse its planned version, if any, at the
+                 # version it will have after this run. Mods that aren't installed yet count
+                 # too, except against core: such a mod gets skipped rather than holding core back
+    local version='' user='' user_dir='' dep='' range='' users=''
+    version=$(planned "$1")
+    users=$(installed_mods "$PREFIX")
+    if [ "$1" != core ]; then users="$users $RUN"; fi
+    for user in $users; do
+        if [ "$user" = "$1" ]; then continue; fi
+        user_dir=$(in_place "$user")
+        if [ -z "$user_dir" ]; then continue; fi
+        for dep in $(dep_names "$user_dir"); do
+            range=$(dep_range "$user_dir" "$dep")
+            if [ "$dep" = "$1" ] && ! satisfies "$version" "$range"; then
+                echo "$user $(meta "$user_dir" version) needs $1@$range"; return
+            fi
+        done
+    done
+}
+
+unplan() {  # unplan <mod>: take it out of the run (its plan stays, for a return)
+    local kept=' ' mod=''
+    for mod in $RUN; do if [ "$mod" != "$1" ]; then kept="$kept$mod "; fi; done
+    RUN=$kept
+}
+
+needed_by_plan() {  # needed_by_plan <mod>: another mod the run changes depends on it
+    local mod='' dep=''
+    for mod in $RUN; do
+        if [ "$mod" != "$1" ] && changing "$mod"; then
+            for dep in $(dep_names "$(in_place "$mod")"); do
+                if [ "$dep" = "$1" ]; then return 0; fi
+            done
+        fi
+    done
+    return 1
+}
+
+step_down() {  # step_down <mod> <reason>: its planned version goes to the next older one, the
+               # newest's reason kept; with none left it's held back: an installed copy stays
+               # as it is, a new mod isn't installed. Core can't be held back: nothing changes
+    local state="$TMP/plan/$1" next=''
+    if [ ! -f "$state/why" ]; then echo "$2" >"$state/why"; fi
+    next=$(head -n 1 "$state/cands")
+    if [ -n "$next" ]; then
+        tail -n +2 "$state/cands" >"$state/rest" && mv "$state/rest" "$state/cands"
+        echo "$next" >"$state/version"
+        return 0
+    fi
+    if [ "$1" = core ]; then
+        die "core $(planned core) can't be installed, so nothing was changed: $2. Update or remove that mod first."
+    fi
+    : >"$state/version"
+    unplan "$1"
+    SKIPPED="$SKIPPED$1 "
+}
+
+hold_back() {  # hold_back <mod> <reason>: at commit time, when a mod before it failed: take it
+               # out of the run and say so
+    unplan "$1"
+    if [ -d "$PREFIX/$1" ]; then
+        warn "$1 $(meta "$TMP/stage/$1" version) not installed, keeping $(meta "$PREFIX/$1" version): $2"
+    else
+        warn "$1 skipped: $2"
+    fi
+}
+
+check_archive() {  # check_archive <mod> <archive>: it holds only the mod's folder: files,
+                   # folders and symlinks, no . or .. in a path, nothing beneath a symlink (it
+                   # would be written through), and not .installed or boot.log, which only the
+                   # TV writes there. Stops the run otherwise
+    local problem=''
+    if ! tar -tzf "$2" >"$TMP/names" 2>/dev/null || ! tar -tzvf "$2" >"$TMP/listing" 2>/dev/null; then
+        die "$1: its archive can't be read"
+    fi
+    cut -c1 "$TMP/listing" >"$TMP/types"
+    problem=$(awk -v mod="$1" '
+        NR == FNR { type[FNR] = $0; types = FNR; next }
+        { name[FNR] = $0; names = FNR }
+        END {
+            if (names != types) { print "its archive lists entries that cannot be told apart"; exit }
+            for (i = 1; i <= names; i++) {
+                sub(/\/$/, "", name[i])
+                if (type[i] == "l") link[name[i]] = 1
+            }
+            for (i = 1; i <= names; i++) {
+                path = name[i]
+                if (type[i] != "-" && type[i] != "d" && type[i] != "l") { print "its archive holds " path ", not a file, folder or symlink"; exit }
+                if (path != mod && index(path, mod "/") != 1) { print "its archive holds " path ", outside " mod "/"; exit }
+                if (("/" path "/") ~ /\/\.\.?\//) { print "its archive holds " path ", with . or .. in its path"; exit }
+                if (path == mod "/.installed" || path == mod "/boot.log") { print "its archive holds " substr(path, length(mod) + 2) ", which only the TV writes"; exit }
+                for (l in link) if (index(path, l "/") == 1) { print "its archive holds " path ", beneath the symlink " l; exit }
+            }
+        }' "$TMP/types" "$TMP/names")
+    if [ -n "$problem" ]; then die "$1: $problem"; fi
+}
+
+stage() {  # stage <mod>: download its planned version, check it and unpack it into $TMP/stage,
+           # with its install record. Stops the run if anything's amiss
+    local version='' dir='' url='' file='' sum='' got='' why=''
+    version=$(planned "$1")
+    dir=$(stanza "$1" "$version")
+    file=$(sed -n 's/^file=//p' "$dir/meta")   # sed: before core's first install, no helpers yet
+    sum=$(sed -n 's/^sha256=//p' "$dir/meta")
+    case $file in
+        https://*) url=$file ;;
+        '' | /* | ../* | */../* | */.. | *[!A-Za-z0-9._/+-]*) die "$1 $version: $REPO lists it as '$file', not a file name" ;;
+        *) url="$REPO/$file" ;;
+    esac
+    download "$url" "$TMP/$1.tar.gz" || die "download failed: $url"
+    got=$(sha256sum "$TMP/$1.tar.gz" | cut -d' ' -f1)
+    [ "$got" = "$sum" ] || die "$1 $version: checksum mismatch ($url)"
+    check_archive "$1" "$TMP/$1.tar.gz"
+    rm -rf "$TMP/unpack" && mkdir -p "$TMP/unpack" "$TMP/stage"
+    tar -xzf "$TMP/$1.tar.gz" -C "$TMP/unpack"
+    [ -d "$TMP/unpack/$1" ] || die "$1: archive must contain a $1/ directory"
+    mv "$TMP/unpack/$1" "$TMP/stage/$1"
+    # shellcheck disable=SC1091
+    if [ "$1" = core ]; then . "$TMP/stage/core/libmod.sh"; fi   # the helpers from here on
+    why=$(meta_problem "$TMP/stage/$1")
+    [ -z "$why" ] || die "$1: $why"
+    [ "$(meta "$TMP/stage/$1" version)" = "$version" ] ||
+        die "$1: $url holds version $(meta "$TMP/stage/$1" version), its index says $version"
+    printf 'repository=%s\nversion=%s\nurl=%s\nsha256=%s\ndate=%s\n' "$REPO" "$version" \
+        "$url" "$sum" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$TMP/stage/$1/.installed"
+}
+
+selfupdate() {  # selfupdate <command> <mod>...: run the webos-mods of the core this run chose,
+                # newer than this copy, with the same command instead of this copy, and exit
+                # with its status. That core is downloaded and checked like any mod; if that
+                # fails, this says so and returns, and this copy carries on with its own core
+    local version='' st=0
+    version=$(planned core)
+    explain_mod core   # why not the newest, if it isn't
+    # In a subshell, so that a failure ends only that. It runs as a plain command: tested
+    # by if or ||, it would have its set -e switched off, and carry on past a failure
+    set +e
+    (set -e; stage core; [ -f "$TMP/stage/core/bin/webos-mods" ] || die "core $version holds no webos-mods")
+    st=$?
+    set -e
+    if [ "$st" != 0 ]; then
+        rm -rf "$TMP/stage/core"
+        warn "couldn't get core $version; running the installed $VERSION"
+        return 0
+    fi
+    log "running webos-mods $version instead of the installed $VERSION"
+    rm -rf "$LOCK"   # for that run to take
+    LOCK=''
+    MODS_NO_SELFUPDATE=1 sh "$TMP/stage/core/bin/webos-mods" "$@" || st=$?
+    exit "$st"
+}
+
+run_script() {  # run_script <mod> <install|uninstall> <reason> [version]: run the mod's
+                # script with those arguments, if it has one
+    local script="$PREFIX/$1/$2"
+    shift 2
+    if [ -f "$script" ]; then sh "$script" "$@"; fi
+}
+
+remove_mod() {  # remove_mod <mod>: run its uninstall script, then delete it and its hook
+    run_script "$1" uninstall remove || warn "$1: uninstall script failed, continuing"
+    rm -rf "${PREFIX:?}/$1"
+    rm -f "$INITD"/[0-9][0-9]-mod-"$1"
+}
+
+start_mod() {  # start_mod <mod> <what happened>: give it a hook and start it if it has a
+               # boot script, and report what happened ("installed", "restored")
+    local dir="$PREFIX/$1" ver='' hook='' st=0
+    ver=$(meta "$dir" version)
+    if [ ! -f "$dir/boot" ]; then log "$1 $ver $2"; return 0; fi
+    mkdir -p "$INITD"
+    hook=$INITD/$(boot_order "$dir")-mod-$1
+    printf '#!/bin/ash\n. "%s/core/libmod.sh" && run_boot "%s" %s\n' "$PREFIX" "$PREFIX" "$1" >"$hook"
+    chmod 755 "$hook"
+    run_boot "$PREFIX" "$1" || st=$?
+    case $st in
+        0) log "$1 $ver $2 and started" ;;
+        1) warn "$1 $ver $2 but $(cat "$dir/boot.log")" ;;
+        *) warn "$1 $ver $2, but its boot script failed: see $dir/boot.log" ;;
+    esac
+}
+
+commit() {  # commit <mod>: put its new version in place, run its install script, start it.
+            # If the install script fails, undo that and put any old version back
+    local dir="$PREFIX/$1" old="$PREFIX/.$1.old" new='' prev='' st=0
+    local dep='' range='' dep_version=''
+    new=$(meta "$TMP/stage/$1" version)
+    if [ -d "$dir" ]; then
+        prev=$(meta "$dir" version)
+        run_script "$1" uninstall update "$new" || warn "$1: uninstall script failed, continuing"
+        rm -f "$INITD"/[0-9][0-9]-mod-"$1"
+        rm -rf "$old"
+        mv "$dir" "$old"
+    fi
+    mkdir -p "$PREFIX"
+    mv "$TMP/stage/$1" "$dir"
+    unplan "$1"   # from here on, the copy in place is the installed one
+    if [ -n "$prev" ]; then
+        run_script "$1" install update "$prev" || st=$?
+    else
+        run_script "$1" install install || st=$?
+    fi
+    if [ "$st" = 0 ]; then
+        rm -rf "$old"
+        start_mod "$1" installed
+        return 0
+    fi
+    FAILED=1
+    if [ -z "$prev" ]; then
+        run_script "$1" uninstall remove || :
+        rm -rf "$dir"
+        warn "$1 $new not installed: its install script failed"
+        return 0
+    fi
+    run_script "$1" uninstall update "$prev" || :
+    rm -rf "$dir"
+    mv "$old" "$dir"
+    if ! run_script "$1" install update "$new"; then
+        warn "$1 $new not installed: its install script failed, and putting $prev back failed too; reinstall or remove $1"
+        return 0
+    fi
+    warn "$1 $new not installed: its install script failed, so $prev is back"
+    start_mod "$1" restored
+    for dep in $(dep_names "$dir"); do   # what it needs may have been updated meanwhile
+        range=$(dep_range "$dir" "$dep")
+        dep_version=$(meta "$PREFIX/$dep" version)
+        if [ -z "$dep_version" ] || ! satisfies "$dep_version" "$range"; then
+            warn "$1 $prev may not work: it needs $dep@${range:-*}, and $dep is ${dep_version:-not installed}"
+        fi
+    done
+}
+
+needed_by() {  # needed_by <mod> <set>: installed mods outside <set> that depend on <mod>
+    local other='' dep=''
+    for other in $(installed_mods "$PREFIX"); do
+        if [ "$other" != "$1" ] && ! has "$2" "$other"; then
+            for dep in $(dep_names "$PREFIX/$other"); do
+                if [ "$dep" = "$1" ]; then printf ' %s' "$other"; fi
+            done
+        fi
+    done
+}
+
+remove_cmd() {  # remove <mod>...: refused while other installed mods need them. Core,
+                # and this command with it, goes only when named
+    local targets=' ' name='' users='' order=''
+    for name in "$@"; do
+        check_name "$name"
+        if [ -d "$PREFIX/$name" ]; then targets="$targets$name "; else log "$name is not installed"; fi
+    done
+    for name in $targets; do
+        users=$(needed_by "$name" "$targets")
+        if [ -z "$users" ]; then continue; fi
+        if [ "$name" = core ]; then die "core (self) is needed by:$users"; fi
+        die "$name is needed by:$users"
+    done
+    # shellcheck disable=SC2086 # $targets: a set of checked names, split on purpose
+    for name in $(dep_order "$PREFIX" $targets); do   # reversed: dependents go first
+        if [ "$name" != core ]; then order="$name $order"; fi
+    done
+    for name in $order; do
+        remove_mod "$name"
+        log "$name removed"
+    done
+    if has "$targets" core; then
+        remove_mod core
+        log "core removed, and the webos-mods command with it"
+    fi
+}
+
+list_cmd() {  # list: this version, the TV's webOS, then each mod's version and anything amiss
+    local mod='' dir='' note=''
+    WEBOS=$(webos_version)
+    echo "webos-mods $VERSION"
+    echo "webOS ${WEBOS:-unknown}"
+    for mod in $(installed_mods "$PREFIX"); do
+        dir=$PREFIX/$mod
+        note=
+        if ! webos_ok "$dir" "$WEBOS"; then
+            note="not started: needs webOS $(meta "$dir" 'engines\.webos')"
+        elif [ -f "$dir/boot.log" ]; then
+            case $(tail -n 1 "$dir/boot.log") in
+                'boot script failed'*) note="boot script failed, see $dir/boot.log" ;;
+            esac
+        fi
+        printf '%-16s %-8s %s\n' "$mod" "$(meta "$dir" version)" "$note"
+    done
+}
+
+search_cmd() {  # search [<word>]: a line for each mod the repository lists whose name,
+                # description or keywords hold <word>, in any case (all without one): its
+                # newest version that suits the TV, its description, and whether it's
+                # installed and up to date or can be updated, or needs another webOS
+    local word="$1" mod='' version='' dir='' installed='' mark='' found='' vc=''
+    for mod in "$TMP/repo/mods"/*/; do
+        mod=${mod%/}
+        mod=${mod##*/}
+        version=$(for_tv "$mod")
+        dir=$(stanza "$mod" "${version:-$(versions_of "$mod" | head -n 1)}")
+        if [ -n "$word" ] && ! printf '%s\n%s\n%s\n' "$mod" "$(meta "$dir" description)" \
+            "$(meta "$dir" keywords)" | grep -qiF -e "$word"; then
+            continue
+        fi
+        found=1
+        installed=$(installed_version "$mod")
+        mark=''
+        if [ -n "$installed" ] && [ "$installed" = "$version" ]; then
+            mark=installed
+        elif [ -n "$installed" ] && [ -n "$version" ] && _vcmp "$version" "$installed" && [ "$vc" -gt 0 ]; then
+            mark="installed $installed, update available"
+        elif [ -n "$installed" ]; then
+            mark="installed $installed"
+        fi
+        if [ -z "$version" ]; then
+            mark="${mark:+$mark, }needs webOS $(meta "$dir" 'engines\.webos')"
+        fi
+        printf '%-16s %-8s %s%s\n' "$mod" "$(meta "$dir" version)" "$(meta "$dir" description)" "${mark:+ [$mark]}"
+    done
+    if [ -z "$found" ]; then log "no mod matches '$word'"; fi
+}
+
+info_cmd() {  # info <mod>: what the repository says about <mod>: the details of its newest
+              # version that suits the TV (or else its newest), and every version it lists,
+              # marking the one installed and those that need another webOS
+    local mod="$1" version='' dir='' installed='' key='' value='' dep='' range='' list='' marks='' seen=''
+    if ! listed "$mod"; then
+        if [ -d "$PREFIX/$mod" ]; then die "$mod isn't in the repository any more"; fi
+        die "$mod: no such mod in $REPO"
+    fi
+    version=$(for_tv "$mod")
+    dir=$(stanza "$mod" "${version:-$(versions_of "$mod" | head -n 1)}")
+    echo "name: $mod"
+    for key in version description license homepage keywords author; do
+        value=$(meta "$dir" "$key")
+        if [ "$key" = keywords ]; then value=$(printf '%s\n' "$value" | sed 's/,/, /g'); fi
+        if [ -n "$value" ]; then echo "$key: $value"; fi
+    done
+    value=''
+    # shellcheck disable=SC2013 # the names it declares, checked when the index was read
+    for dep in $(sed -n 's/^dependencies\.\([^=]*\)=.*/\1/p' "$dir/meta"); do
+        range=$(dep_range "$dir" "$dep")
+        value="${value:+$value, }$dep@${range:-*}"
+    done
+    if [ -n "$value" ]; then echo "dependencies: $value"; fi
+    value=$(meta "$dir" 'engines\.webos')
+    if [ -n "$value" ]; then echo "webOS: $value"; fi
+    installed=$(installed_version "$mod")
+    for version in $(versions_of "$mod"); do
+        marks=''
+        if [ "$version" = "$installed" ]; then marks=installed seen=1; fi
+        if ! suits_tv "$mod" "$version"; then
+            marks="${marks:+$marks, }needs webOS $(meta "$(stanza "$mod" "$version")" 'engines\.webos')"
+        fi
+        list="${list:+$list, }$version${marks:+ ($marks)}"
+    done
+    echo "versions: $list"
+    if [ -n "$installed" ] && [ -z "$seen" ]; then echo "installed: $installed, which the repository no longer lists"; fi
+    echo "repository: $REPO"
+}
+
+plan_wanted() {  # plan_wanted: put each wanted mod in the run, then settle their versions
+    local name=''
+    for name in $WANTED; do
+        if has "$RUN" "$name"; then continue; fi
+        if ! plan_mod "$name"; then SKIPPED="$SKIPPED$name "; fi
+    done
+    settle
+}
+
+settle() {  # settle: step versions down until every mod in the run fits with the others.
+            # The mods a changing mod depends on join the run; versions another mod refuses
+            # step down first, so a clash moves the dependency, not the dependent; then those
+            # whose own dependencies aren't met; mods nothing changing needs leave the run
+    local changed=1 mod='' dep='' why=''
+    while [ -n "$changed" ]; do
+        changed=
+        for mod in $RUN; do
+            changing "$mod" || continue
+            for dep in $(dep_names "$(in_place "$mod")"); do
+                if has "$RUN" "$dep" || has "$SKIPPED" "$dep"; then continue; fi
+                if [ -d "$TMP/plan/$dep" ] || [ -d "$PREFIX/$dep" ] || listed "$dep"; then
+                    if ! plan_mod "$dep"; then SKIPPED="$SKIPPED$dep "; fi
+                    changed=1
+                fi
+            done
+        done
+        for mod in $RUN; do
+            changing "$mod" || continue
+            why=$(rejected_by "$mod")
+            if [ -n "$why" ]; then step_down "$mod" "$why"; changed=1; fi
+        done
+        for mod in $RUN; do
+            changing "$mod" || continue
+            why=$(needs_unmet "$mod")
+            if [ -n "$why" ]; then step_down "$mod" "$why"; changed=1; fi
+        done
+        for mod in $RUN; do
+            if ! has "$WANTED" "$mod" && ! needed_by_plan "$mod"; then unplan "$mod"; changed=1; fi
+        done
+    done
+}
+
+explain() {  # explain: say which newer versions didn't go in, and why, and what's up to date
+    local mod=''
+    for mod in $RUN $SKIPPED; do explain_mod "$mod"; done
+}
+
+explain_mod() {  # explain_mod <mod>: say why its newest version doesn't go in, if it doesn't,
+                 # or that it's up to date
+    local state="$TMP/plan/$1" newest='' version='' installed=''
+    newest=$(cat "$state/newest" 2>/dev/null || :)
+    version=$(planned "$1")
+    installed=$(installed_version "$1")
+    if has "$SKIPPED" "$1"; then
+        if [ -n "$installed" ]; then
+            warn "$1 $newest not installed, keeping $installed: $(cat "$state/why")"
+        else
+            warn "$1 skipped: $(cat "$state/why")"
+        fi
+    elif [ -f "$state/why" ] && [ "$version" != "$newest" ]; then
+        if changing "$1"; then
+            warn "$1 $newest not installed, $version instead: $(cat "$state/why")"
+        else
+            warn "$1 $newest not installed, keeping $installed: $(cat "$state/why")"
+        fi
+    elif ! changing "$1" && [ -n "$installed" ] && has "$WANTED" "$1"; then
+        log "$1 $installed is up to date"
+    fi
+}
+
+main() {
+    local cmd='' name='' mod='' count=0 arg='' asked='' had_core='' core_version='' why=''
+    case $VERSION in @*) VERSION=dev ;; esac
+    case ${1:-} in
+        install | reinstall | remove | update | list | search | info) cmd=$1; shift ;;
+        help | -h | --help) usage; return 0 ;;
+        '') usage >&2; exit 1 ;;
+        *) die "unknown command: $1 (see webos-mods help)" ;;
+    esac
+
+    trap cleanup EXIT
+    PREFIX=${MODS_PREFIX:-/media/developer/mods}
+    case $PREFIX in /*) ;; *) die "MODS_PREFIX must be an absolute path: $PREFIX" ;; esac
+    REPO=$(repository)   # checks MODS_REPOSITORY
+
+    # When it installs or updates, the installed command may choose a newer core than its
+    # own, and then runs that core's webos-mods instead (selfupdate). The other commands,
+    # and a piped copy, keep to their own core, which for the installed command is the
+    # installed one.
+    case $cmd in
+        install | reinstall | update)
+            if [ -n "$(own_core)" ] && [ -n "$REPO" ] && [ "$VERSION" != dev ] &&
+                [ "${MODS_NO_SELFUPDATE:-}" != 1 ]; then
+                SELFUPDATE=1
+            fi ;;
+    esac
+
+    [ "$(id -u)" = 0 ] || die "must run as root"
+    [ -d "${INITD%/*}" ] || die "Homebrew Channel not found (no ${INITD%/*}) - is this a rooted webOS TV?"
+
+    count=$#   # "self" stands for core
+    for arg in "$@"; do
+        if [ "$arg" = self ]; then arg=core; fi
+        set -- "$@" "$arg"
+    done
+    shift "$count"
+    asked=" $* "
+    if [ "$cmd" = reinstall ]; then FORCE=" $* "; fi
+    case $cmd in   # the commands that change the mods dir, before they read it
+        install | reinstall | update | remove) lock ;;
+    esac
+
+    if [ -f "$PREFIX/core/libmod.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$PREFIX/core/libmod.sh"                       # the installed core
+        had_core=1
+    elif [ "$cmd" = list ]; then
+        echo "webos-mods $VERSION"
+        echo "nothing installed"
+        return
+    elif [ "$cmd" = remove ] || [ "$cmd" = update ]; then
+        die "nothing installed"
+    fi
+    case $cmd in
+        list) list_cmd; return ;;
+        remove) [ $# -gt 0 ] || die "usage: webos-mods remove <mod>..."; remove_cmd "$@"; return ;;
+        search) [ $# -le 1 ] || die "usage: webos-mods search [<word>]" ;;
+        info) [ $# = 1 ] || die "usage: webos-mods info <mod>"; check_name "$1" ;;
+        update)
+            for name in "$@"; do
+                check_name "$name"
+                [ -d "$PREFIX/$name" ] || die "$name is not installed"
+            done
+            # shellcheck disable=SC2046 # installed mods' names, checked when they went in
+            if [ $# = 0 ]; then set -- $(installed_mods "$PREFIX"); fi ;;
+        *)
+            [ $# -gt 0 ] || die "usage: webos-mods $cmd <mod>..."
+            for name in "$@"; do check_name "$name"; done ;;
+    esac
+
+    command -v sha256sum >/dev/null || die "sha256sum not found"
+    [ -n "$REPO" ] || die "unpublished webos-mods: set MODS_REPOSITORY"
+    TMP=$(mktemp -d)
+    read_repository
+
+    # Core first, at this command's own version (lockstep, even below the installed one;
+    # in an unpublished copy, the newest). When that isn't the installed core, it's
+    # staged now, and its libmod.sh, the version about to go in, gives the helpers
+    # everything below relies on: search and info too, which install nothing. Otherwise
+    # core is planned like the other mods, at this version, or above it if SELFUPDATE
+    core_version=$VERSION
+    if [ "$core_version" = dev ]; then core_version=$(versions_of core 2>/dev/null | head -n 1); fi
+    listed core "$core_version" || die "core $core_version isn't in $REPO"
+    if [ "$(installed_version core)" != "$core_version" ]; then
+        mkdir -p "$TMP/plan/core"
+        echo "$core_version" >"$TMP/plan/core/version"
+        : >"$TMP/plan/core/cands"
+        RUN=' core '
+        stage core
+    fi
+    WEBOS=$(webos_version)
+    case $cmd in
+        search) search_cmd "${1-}"; return ;;
+        info) info_cmd "$1"; return ;;
+    esac
+
+    WANTED=' core '
+    for name in "$@"; do
+        if has "$WANTED" "$name"; then continue; fi
+        if listed "$name"; then
+            WANTED="$WANTED$name "
+        elif [ -d "$PREFIX/$name" ]; then
+            warn "$name isn't in the repository any more; leaving it as is"
+        else
+            die "$name: no such mod in $REPO"
+        fi
+    done
+    plan_wanted
+    if [ -n "$SELFUPDATE" ] && [ "$(planned core)" != "$VERSION" ]; then
+        # shellcheck disable=SC2086 # $asked: checked names, split on purpose
+        selfupdate "$cmd" $asked   # returns only if it couldn't get that core
+        SELFUPDATE=''              # then this copy carries on, with its own core
+        rm -rf "$TMP/plan"
+        RUN=' ' SKIPPED=' '
+        plan_wanted
+    fi
+    explain
+    for mod in $FORCE; do   # a reinstall needs its version in the repository
+        if changing "$mod" && [ "$(planned "$mod")" = "$(installed_version "$mod")" ] &&
+            ! listed "$mod" "$(planned "$mod")"; then
+            warn "$mod $(planned "$mod") isn't in the repository any more, so it can't be reinstalled"
+            FORCE=$(echo "$FORCE" | sed "s/ $mod / /")
+        fi
+    done
+    # A core that isn't installed yet goes in with other mods, or when asked for
+    PLAN=' '
+    for mod in $RUN; do if changing "$mod"; then PLAN="$PLAN$mod "; fi; done
+    if [ "$PLAN" = ' core ' ] && [ -z "$had_core" ] && ! has "$asked" core; then
+        PLAN=' '
+    fi
+
+    # Everything is downloaded and checked before anything changes
+    for mod in $PLAN; do
+        if [ ! -d "$TMP/stage/$mod" ]; then stage "$mod"; fi
+    done
+    if has "$PLAN" core; then commit core; fi
+    # shellcheck disable=SC2086 # $PLAN: a set of checked names, split on purpose
+    for mod in $(dep_order "$TMP/stage" $PLAN); do   # each after the mods it needs
+        if [ "$mod" = core ]; then continue; fi
+        why=$(needs_unmet "$mod")   # a mod before it may have failed to install
+        if [ -n "$why" ]; then hold_back "$mod" "$why"; continue; fi
+        commit "$mod"
+    done
+    # ...and goes again if every mod it came with failed to install
+    if [ -z "$had_core" ] && ! has "$asked" core && [ "$(installed_mods "$PREFIX")" = core ]; then
+        remove_mod core
+    fi
+    if [ -z "$had_core" ] && [ -d "$PREFIX/core" ]; then
+        log "webos-mods is now a command: $PREFIX/core/bin/webos-mods (on PATH in new login shells)"
+    fi
+    if [ -n "$FAILED" ]; then exit 1; fi
+}
+
+main "$@"

@@ -1,0 +1,9 @@
+#!/bin/ash
+# Undo boot: drop the bind mount and the stock file shows through again.
+# shellcheck shell=dash
+
+# shellcheck disable=SC1091
+. "${0%/*}/../core/libmod.sh"
+
+F=${MODS_HOSTS_FILE:-/etc/hosts}
+if is_mounted "$F"; then umount "$F"; fi

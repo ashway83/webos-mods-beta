@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+#
+# tools/build-repo - checks a folder of mods, then builds a webos-mods repository from
+# it on top of the repository published so far:
+#
+#   tools/build-repo [--from <published repository>] --url <URL> --key <private key>...
+#                    [--base <git ref>] <mods dir> <output dir>
+#   tools/build-repo help (or -h, --help)
+#
+# The checks look at every mod and report every problem they find, and then nothing is
+# built: its name (self stands for core), what it holds (files, folders and symlinks,
+# not .installed or boot.log, which the TV writes there), its meta (to publish, only
+# known keys, each once, and a description and a license), that its scripts are clean
+# for shellcheck as dash scripts (the TV runs them with its sh, busybox ash), that the
+# mods it depends on are there in a version its range accepts, and that it doesn't
+# depend on itself. Core has to be among the mods: it holds webos-mods and the helpers.
+# A cycle of mods that depend on each other is fine, as with APT and pacman: a note
+# names it and the mod that goes in first (by dep_order, as on the TV). boot_order
+# isn't checked: it only sorts init.d hooks. With --base, as on a pull request, each
+# mod whose files changed since that git ref (<ref>...HEAD) must also have a higher
+# version than it had there.
+# The output, which must be empty, gets the published archives of every mod that still
+# has a folder, all their versions (a removed mod's archives are left behind), a new
+# <mod>-<version>.tar.gz for each mod whose version isn't published yet, and an index
+# listing them all: a first line format=1, then per archive, after a blank line, its
+# name, the mod's meta lines (without comments and blank lines), file and sha256. A
+# published version is never rebuilt, so it never changes.
+# Core's command is stamped with core's version and <URL> (where the repository is
+# served: https:// or file://, in the characters the command accepts, which can't break
+# the stamping), and published as webos-mods-<version>, with webos-mods a copy of the
+# newest one, for the one-liner. The build stops if a placeholder is left in it.
+# The index is signed with each --key (an ECDSA P-256 private key, in PEM): index.sig
+# holds a base64 signature (SHA-256) a line, which the command checks with the public
+# key written in it. A key isn't checked against that one, so a trial build can use a
+# throwaway key; what's published is checked by CI's publish job. Two keys sign during a
+# key change, while commands with only the old key are still in use.
+# Archives hold their mod's folder owned by root and not writable by group or others:
+# root unpacks them on the TV, keeping the owner and permissions they carry.
+# Runs in CI and on developer machines, never on a TV: needs bash 4 or later, GNU tar
+# (as tar or gtar), sha256sum, sort -V, openssl, shellcheck, and git for --base. It
+# checks mods with core's libmod.sh from its own checkout.
+#
+# Copyright (c) 2026 Andriy Sharandakov
+#
+# This script is licensed under the MIT License.
+# See the LICENSE file for details.
+#
+# GitHub: https://github.com/ashway83/webos-mods
+
+set -euo pipefail
+shopt -s nullglob
+export LC_ALL=C   # compare and sort by bytes, as the TV does, wherever this runs
+
+if (( BASH_VERSINFO[0] < 4 )); then echo "!! needs bash 4 or later" >&2; exit 1; fi
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck disable=SC1091
+. "$ROOT/mods/core/libmod.sh"
+
+MODS=''                    # the folder of mods
+TAR=''                     # what GNU tar is called here
+WORK=''                    # the temp folder the repository is put together in
+FAILED=''                  # 1 once a check has found a problem
+KEYS=()                    # the private keys that sign the index
+declare -A VERSION_OF=()   # the version of each mod whose name and meta passed
+
+log() { echo ">> $*"; }
+die() { echo "!! $*" >&2; exit 1; }
+
+usage() {  # the command line, for help
+    cat <<'EOF'
+build-repo: checks a folder of mods, then builds a webos-mods repository from it
+usage: tools/build-repo [<option>...] <mods dir> <output dir>
+  --from <dir>   the repository published so far, whose archives are kept as they are
+  --url <URL>    where the repository is served (https:// or file://), for core's
+                 command; required
+  --key <file>   a private key that signs the index (ECDSA P-256, PEM); required,
+                 and given twice during a key change
+  --base <ref>   a git ref: each mod whose files changed since then needs a higher version
+The output folder must be empty or absent.
+EOF
+}
+
+need_value() {  # need_value <option> [<value>]: stop unless the option has its value
+    (( $# >= 2 )) || die "$1 needs a value (see tools/build-repo help)"
+}
+
+problem() {  # problem <text>: report what a check found (in GitHub Actions also as an
+             # annotation); nothing gets built then. Line breaks in names show as \n, so
+             # that no name starts a line of its own (in CI, a workflow command)
+    local text=$*
+    text=${text//$'\r'/\\r}
+    text=${text//$'\n'/\\n}
+    echo "!! $text" >&2
+    if [[ ${GITHUB_ACTIONS-} == true ]]; then echo "::error::${text//'%'/%25}"; fi
+    FAILED=1
+}
+
+and_list() {  # and_list <word>...: the words as "a", "a and b" or "a, b and c"
+    local text=$1
+    shift
+    while (( $# > 1 )); do text+=", $1"; shift; done
+    if (( $# )); then text+=" and $1"; fi
+    echo "$text"
+}
+
+gnu_tar() {  # gnu_tar: the name GNU tar goes by here
+    local name
+    for name in gtar tar; do
+        if command -v "$name" >/dev/null && "$name" --version 2>/dev/null | grep -q 'GNU tar'; then
+            echo "$name"; return
+        fi
+    done
+}
+
+check_mods() {  # check_mods: every mod's name, contents, meta, scripts, dependencies and
+                # their cycles
+    local dir name path file why script findings finding dep range group
+    local -A broken=()   # mods reported already (their meta failed, or core is missing):
+                         # their dependents aren't faulted for them
+    for dir in "$MODS"/*/; do
+        dir=${dir%/}
+        name=${dir##*/}
+        if [[ ! $name =~ ^[A-Za-z0-9_-]+$ ]]; then problem "invalid mod name: '$name'"; continue; fi
+        if [[ $name == self ]]; then problem "self: reserved name, it stands for core"; continue; fi
+        # Root unpacks a mod on the TV, and writes in its folder: files, folders and symlinks
+        if [[ -L $dir ]]; then problem "$name: its folder is a symlink, so its archive would hold no files"; continue; fi
+        while IFS= read -r -d '' path; do
+            problem "$name: ${path#"$dir"/} is a special file; a mod holds files, folders and symlinks"
+        done < <(find "$dir" ! -type f ! -type d ! -type l -print0)
+        for file in .installed boot.log; do
+            if [[ -e $dir/$file || -L $dir/$file ]]; then problem "$name: holds $file, which only the TV writes"; fi
+        done
+        why=$(publish_problem "$dir")
+        if [[ -n $why ]]; then problem "$name: $why"; broken[$name]=1; continue; fi
+        VERSION_OF[$name]=$(meta "$dir" version)
+        for script in install boot uninstall libmod.sh bin/webos-mods; do   # as dash, whatever
+            # their first line says: the TV runs them with its sh (busybox ash)
+            if [[ -f $dir/$script ]] && ! findings=$(shellcheck --shell=dash --format=gcc "$dir/$script" 2>&1); then
+                while IFS= read -r finding; do
+                    problem "$name: ${finding#"$dir"/}"
+                done <<<"${findings:-$script: shellcheck failed}"
+            fi
+        done
+    done
+    if [[ ! -d $MODS/core ]]; then   # once, not for every mod that needs it
+        problem "core isn't among the mods: a repository needs it, for webos-mods and its helpers"
+        broken[core]=1
+    fi
+    for name in $(printf '%s\n' "${!VERSION_OF[@]}" | sort); do
+        dir=$MODS/$name
+        for dep in $(dep_names "$dir"); do
+            if [[ $dep == "$name" ]]; then problem "$name depends on itself"; continue; fi
+            if [[ -n ${broken[$dep]-} ]]; then continue; fi
+            if [[ -z ${VERSION_OF[$dep]-} ]]; then
+                problem "$name depends on $dep, which isn't among the mods"
+                continue
+            fi
+            range=$(dep_range "$dir" "$dep")
+            if ! satisfies "${VERSION_OF[$dep]}" "$range"; then
+                problem "$name needs $dep@$range, but $dep is at ${VERSION_OF[$dep]}"
+            fi
+        done
+    done
+    while IFS= read -r group; do   # a cycle: its mods go in together, by name
+        if [[ $group == *' '* ]]; then
+            # shellcheck disable=SC2086 # mod names, checked: split on purpose
+            log "$(and_list $group) form a dependency cycle: they install together, ${group%% *} first"
+        fi
+    done < <(dep_order "$MODS" "${!VERSION_OF[@]}")
+}
+
+check_versions() {  # check_versions <git ref>: each mod whose files changed in <ref>...HEAD
+                    # has a higher version than it had at <ref>
+    local ref=$1 changed name old
+    git -C "$MODS" rev-parse --verify --quiet "$ref^{commit}" >/dev/null ||
+        die "--base: $ref isn't a commit in the git repository holding $MODS"
+    changed=$(git -C "$MODS" diff --no-renames --relative --name-only "$ref...HEAD" -- .) ||
+        die "--base: can't compare with $ref (a shallow clone?)"
+    while IFS= read -r name; do
+        [[ -n ${VERSION_OF[$name]-} ]] || continue   # gone, or failed its checks
+        old=$(git -C "$MODS" show "$ref:./$name/meta" 2>/dev/null | sed -n 's/^version=//p') || old=''
+        [[ -n $old ]] || continue                    # new since <ref>
+        if ! satisfies "${VERSION_OF[$name]}" ">$old"; then
+            problem "$name changed since $ref, so it needs a version higher than $old"
+        fi
+    done < <(printf '%s\n' "$changed" | cut -d/ -f1 | sort -u)
+}
+
+pack() {  # pack <dir> <archive>: <dir> as a .tar.gz with its folder at the top
+    "$TAR" --owner=0 --group=0 --numeric-owner --mode=go-w --exclude=.DS_Store \
+        -C "${1%/*}" -czf "$2" "${1##*/}"
+}
+
+write_index() {  # write_index <repository dir>: its index, listing every archive in it
+    local dir=$1 file base name version
+    {
+        echo "format=1"
+        for file in "$dir"/*.tar.gz; do
+            base=${file##*/}
+            if [[ $base =~ ^(.+)-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz$ ]]; then
+                echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} $base"
+            fi
+        done | sort -k1,1 -k2,2V | while read -r name version base; do
+            echo
+            echo "name=$name"
+            "$TAR" -xzOf "$dir/$base" "$name/meta" | awk '!/^#/ && !/^[[:space:]]*$/'
+            echo "file=$base"
+            echo "sha256=$(sha256sum "$dir/$base" | cut -d' ' -f1)"
+        done
+    } >"$dir/index"
+}
+
+sign_index() {  # sign_index <repository dir>: index.sig, with a base64 signature of the index
+                # (ECDSA, SHA-256) on a line for each signing key
+    local dir=$1 key
+    for key in "${KEYS[@]}"; do
+        openssl dgst -sha256 -sign "$key" "$dir/index" | openssl base64 -A
+        echo
+    done >"$dir/index.sig"
+}
+
+main() {
+    local from='' url='' base='' out name version file archive key text
+    local -A left_out=()
+    case ${1-} in   # as webos-mods does: help on stdout, or without arguments on stderr
+        help | -h | --help) usage; return 0 ;;
+        '') usage >&2; exit 1 ;;
+    esac
+    while (( $# )); do
+        case $1 in
+            --from) need_value "$@"; from=$2; shift 2 ;;
+            --url) need_value "$@"; url=${2%/}; shift 2 ;;
+            --base) need_value "$@"; base=$2; shift 2 ;;
+            --key) need_value "$@"; KEYS+=("$2"); shift 2 ;;
+            -*) die "unknown option: $1 (see tools/build-repo help)" ;;
+            *) break ;;
+        esac
+    done
+    if (( $# != 2 )); then usage >&2; exit 1; fi
+    MODS=$1 out=$2
+    [[ -d $MODS ]] || die "no such folder of mods: $MODS"
+    [[ -z $from || -d $from ]] || die "no such repository: $from"
+    if [[ -e $out && ! -d $out ]]; then die "the output path isn't a folder: $out"; fi
+    if [[ -e $out && -n $(ls -A "$out") ]]; then die "the output folder must be empty: $out"; fi
+    [[ -n $url ]] || die "needs the repository's URL (--url), to stamp into core's command"
+    [[ $url =~ ^[A-Za-z0-9._~:/%+@-]+$ ]] ||
+        die "the repository URL may only hold letters, digits and . _ ~ : / % + @ -: $url"
+    [[ $url =~ ^(https|file)://. ]] || die "the repository URL must start with https:// or file://: $url"
+    (( ${#KEYS[@]} )) || die "needs a private key to sign the index with (--key)"
+    command -v openssl >/dev/null || die "needs openssl"
+    for key in "${KEYS[@]}"; do
+        [[ -f $key ]] || die "no such signing key: $key"
+        text=$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl ec -pubin -noout -text 2>/dev/null) || text=''
+        [[ $text == *'ASN1 OID: prime256v1'* ]] || die "the signing key must be an ECDSA P-256 private key, in PEM: $key"
+    done
+    TAR=$(gnu_tar)
+    [[ -n $TAR ]] || die "needs GNU tar (as tar or gtar)"
+    command -v sha256sum >/dev/null || die "sha256sum not found"
+    command -v shellcheck >/dev/null || die "needs shellcheck"
+    if [[ -n $base ]] && ! command -v git >/dev/null; then die "--base needs git"; fi
+
+    check_mods
+    if [[ -n $base ]]; then check_versions "$base"; fi
+    if [[ -n $FAILED ]]; then exit 1; fi
+
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    mkdir "$WORK/out" "$WORK/stage"
+
+    # What's published already stays as it is, unless its mod has gone
+    if [[ -n $from ]]; then
+        for file in "$from"/*.tar.gz; do
+            [[ ${file##*/} =~ ^(.+)-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz$ ]] || continue
+            name=${BASH_REMATCH[1]}
+            if [[ -n ${VERSION_OF[$name]-} ]]; then
+                cp -p "$file" "$WORK/out/"
+            elif [[ -z ${left_out[$name]-} ]]; then
+                left_out[$name]=1
+                log "leaving out $name: it has no folder any more"
+            fi
+        done
+        for file in "$from"/webos-mods-*; do cp -p "$file" "$WORK/out/"; done
+    fi
+
+    # New versions get built
+    for name in $(printf '%s\n' "${!VERSION_OF[@]}" | sort); do
+        version=${VERSION_OF[$name]}
+        archive=$name-$version.tar.gz
+        if [[ -f $WORK/out/$archive ]]; then
+            log "$name $version is published already"
+            continue
+        fi
+        if [[ $name == core ]]; then
+            cp -Rp "$MODS/core" "$WORK/stage/core"
+            sed -e "s|@VERSION@|$version|" -e "s|@REPOSITORY@|$url|" "$MODS/core/bin/webos-mods" \
+                >"$WORK/stage/core/bin/webos-mods"
+            if grep -q '@[A-Z][A-Z_]*@' "$WORK/stage/core/bin/webos-mods"; then
+                die "core's command still holds $(grep -o '@[A-Z][A-Z_]*@' "$WORK/stage/core/bin/webos-mods" | head -n 1) after stamping"
+            fi
+            cp -p "$WORK/stage/core/bin/webos-mods" "$WORK/out/webos-mods-$version"
+            pack "$WORK/stage/core" "$WORK/out/$archive"
+        else
+            pack "$MODS/$name" "$WORK/out/$archive"
+        fi
+        log "adding $name $version"
+    done
+
+    # The one-liner's copy of the newest command, and the index
+    file=$(printf '%s\n' "$WORK"/out/webos-mods-* | sort -V | tail -n 1)
+    if [[ -n $file ]]; then cp -p "$file" "$WORK/out/webos-mods"; fi
+    write_index "$WORK/out"
+    sign_index "$WORK/out"
+
+    mkdir -p "$out"
+    cp -Rp "$WORK/out/." "$out/"
+}
+
+main "$@"
