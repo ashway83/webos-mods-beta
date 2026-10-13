@@ -360,9 +360,10 @@ crafted() {  # crafted <entry>...: b 1.0.0's published archive, replaced with on
 }
 
 test_an_archive_holding_more_than_its_folder_is_rejected() {
-    crafted '0 b/../x'
-    installer install a
-    assertContains "a dot dot" "$(output)" "b: its archive holds b/../x, with . or .. in its path"
+    crafted '0 b/../x'   # GNU tar (the TV's) lists it as it is; busybox tar strips the b/../
+    installer install a  # off, so it shows as x, outside b/: refused either way
+    assertTrue "a dot dot: $(output)" \
+        "grep -qE 'b: its archive holds (b/\.\./x, with \. or \.\. in its path|x, outside b/)' '$WORLD/out'"
     crafted '2 b/link /etc' '0 b/link/passwd'
     installer install a
     assertContains "beneath a symlink" "$(output)" "b: its archive holds b/link/passwd, beneath the symlink b/link"
