@@ -617,23 +617,30 @@ out again; what was planned or built, to pick up for 2.0:
 
 ## Status
 
-- TV side: all 164 tests pass on the maintainer's TV with shUnit2 2.1.8 and BusyBox
-  1.29.3 (2026-10-13, after step 7); one skips there, the nyx-cmd fallback, which a
-  real TV never reaches. Breaking any of 32 behaviours of the repository-based command,
-  5 of the dependency order, 29 of search and info, 16 of the step 4 self-update, or 7
-  of the signature check fails one there (the self-update's own `set -e` in its
+- TV side: all 166 tests pass on the maintainer's TV with shUnit2 2.1.8 and BusyBox
+  1.29.3 (2026-10-13, after step 7 and the hosts mod's stacking fix); one skips there,
+  the nyx-cmd fallback, which a real TV never reaches. They pass in CI too, under
+  Ubuntu's BusyBox 1.36.1 (whose tar strips an entry's `b/../` when listing it, so the
+  archive check sees `x`, outside `b/`: refused either way). Breaking any of 32
+  behaviours of the repository-based command, 5 of the dependency order, 29 of search
+  and info, 16 of the step 4 self-update, 7 of the signature check, or 3 of the hosts
+  mod's stacking fails one there (the self-update's own `set -e` in its
   subshell only guards failures no test can cause, such as a disk error while
   unpacking). The TV's OpenSSL 1.1.1t verifies signatures made with OpenSSL 3.6 and
   LibreSSL 3.3. Build side: all 48 pass on the maintainer's Mac (bash 5.2, GNU tar 1.35
   as `gtar`, git 2.54, shellcheck 0.10, OpenSSL 3.6, and LibreSSL 3.3 too), none
   skipped, and breaking any of 63 behaviours of `tools/build-repo` and
   `publish_problem`, or 8 of its signing, fails one (2026-10-13). CI's core install
-  step ran on the TV against a real trial build, signed (after step 7). The TV side's
-  suites haven't run under CI's busybox (Ubuntu's) yet; the TV's own `tar` is GNU tar,
-  so busybox tar's listings are untested.
-- Never run yet: `ci.yml` on GitHub. Its steps' scripts ran locally against a bare
-  repository standing in for GitHub: the first publish, a re-run, a new mod version, a
-  run for an older commit, the tag, and the version check on a push.
+  step ran on the TV against a real trial build, signed (after step 7).
+- `ci.yml` ran on GitHub, in the beta repository (2026-10-13): the first run failed
+  on that busybox tar listing; the second passed end to end: both sides' tests, the
+  trial build, core installed into a fake TV, the first publish to `gh-pages` signed
+  with the official key and read by the shipped command before pushing, and the tag
+  `v1.0.0`. Pages serves `https://ashway83.github.io/webos-mods-beta/`, and the
+  one-liner from there installed hosts on the maintainer's TV into `/tmp`, where
+  `list`, `search`, `update` and `remove hosts self` worked. Before that, the steps'
+  scripts ran locally against a bare repository standing in for GitHub, and the
+  version check's base (the last published commit) in a simulation of two pushes.
 - Maintainer's TV: webOS 6 (`core_os_release` 6.5.3-47, kisscurl-koli), aarch64, GNU
   tar 1.17.
 - Not handled yet: a commit interrupted by power loss or a full disk.
