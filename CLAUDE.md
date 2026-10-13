@@ -627,7 +627,7 @@ out again; what was planned or built, to pick up for 2.0:
   mod's stacking fails one there (the self-update's own `set -e` in its
   subshell only guards failures no test can cause, such as a disk error while
   unpacking). The TV's OpenSSL 1.1.1t verifies signatures made with OpenSSL 3.6 and
-  LibreSSL 3.3. Build side: all 48 pass on the maintainer's Mac (bash 5.2, GNU tar 1.35
+  LibreSSL 3.3. Build side: all 49 pass on the maintainer's Mac (bash 5.2, GNU tar 1.35
   as `gtar`, git 2.54, shellcheck 0.10, OpenSSL 3.6, and LibreSSL 3.3 too), none
   skipped, and breaking any of 63 behaviours of `tools/build-repo` and
   `publish_problem`, or 8 of its signing, fails one (2026-10-13). CI's core install
