@@ -638,9 +638,14 @@ out again; what was planned or built, to pick up for 2.0:
   with the official key and read by the shipped command before pushing, and the tag
   `v1.0.0`. Pages serves `https://ashway83.github.io/webos-mods-beta/`, and the
   one-liner from there installed hosts on the maintainer's TV into `/tmp`, where
-  `list`, `search`, `update` and `remove hosts self` worked. Before that, the steps'
-  scripts ran locally against a bare repository standing in for GitHub, and the
-  version check's base (the last published commit) in a simulation of two pushes.
+  `list`, `search`, `update` and `remove hosts self` worked. The third run, the first
+  version check against a published commit, found a bug in `tools/build-repo` (with
+  no mod changed since the base, it read an empty name), fixed with a test; the
+  fourth passed, building on what was published. ECDSA signatures differ every time,
+  so each publish commits a new `index.sig`, even with no new version, and
+  `gh-pages`' newest commit always names the last commit published. Before that, the
+  steps' scripts ran locally against a bare repository standing in for GitHub, and the
+  version check's base in a simulation of two pushes.
 - Maintainer's TV: webOS 6 (`core_os_release` 6.5.3-47, kisscurl-koli), aarch64, GNU
   tar 1.17.
 - Not handled yet: a commit interrupted by power loss or a full disk.
