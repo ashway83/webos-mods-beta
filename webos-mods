@@ -101,7 +101,7 @@
 set -eu
 
 REPOSITORY='https://ashway83.github.io/webos-mods-beta'
-VERSION='1.0.0'
+VERSION='1.0.1'
 # The public key the official repository's index is signed with (ECDSA P-256; its
 # private key is CI's). During a key change this holds the new key too, a PEM block each
 KEYS='

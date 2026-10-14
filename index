@@ -8,6 +8,14 @@ homepage=https://github.com/ashway83/webos-mods
 file=core-1.0.0.tar.gz
 sha256=ffb0a548980feae517d2e6e21b676ac63a9924b8dbe1a5b87d13eb687de5c07e
 
+name=core
+version=1.0.1
+description=The webos-mods command, and the helpers that mods and their boot hooks share
+license=MIT
+homepage=https://github.com/ashway83/webos-mods
+file=core-1.0.1.tar.gz
+sha256=ee5e61c596a97940d466f4dabf31b0933e1b6282225b8f25b52878fcfb1e695e
+
 name=hosts
 version=1.0.0
 description=Adds a blocklist to /etc/hosts, by bind-mounting a merged copy over it
