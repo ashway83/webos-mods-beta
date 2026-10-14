@@ -41,10 +41,10 @@ test_openssl_checks_a_signature_as_webos_mods_does() {
     assertFalse "openssl verifies a signature of something else" $?
 }
 
-test_curl_reaches_github_over_https() {
+test_curl_reaches_github_pages_over_https() {   # where the repository is served from
     if [ -n "${MODS_TEST_OFFLINE:-}" ]; then skip_test; return; fi
-    curl -fsS -o /dev/null --max-time 30 https://github.com/
-    assertTrue "curl can't fetch https://github.com (outdated CA certificates?)" $?
+    curl -fsS -o /dev/null --max-time 30 https://github.io/   # a redirect, which will do
+    assertTrue "curl can't reach https://github.io, which serves the repository (outdated CA certificates?)" $?
 }
 
 # shellcheck disable=SC1090

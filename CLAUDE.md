@@ -20,7 +20,13 @@ current: when a decision changes, update it here.
 - `mods/hosts/`: example mod; bind-mounts `/etc/hosts` as it finds it (stock, or
   Homebrew Channel's copy when that blocks system updates) plus `blocklist` over
   `/etc/hosts`, behind a marker line, and takes off only its own mount
-  (`MODS_HOSTS_FILE` retargets it for tests).
+  (`MODS_HOSTS_FILE` retargets it for tests). Its `blocklist` stays an empty example
+  for now (decided 2026-10-14). Suggested entries, to check against the TV's DNS
+  traffic first: LG's ad servers (`ad.lgsmartad.com`, `info.lgsmartad.com`, and their
+  `us.`/`eu.` variants), telemetry (`ngfts.lge.com`, `aic-ngfts.lge.com`), the
+  viewing-data partner (`alphonso.tv`); not the update servers, which Homebrew Channel
+  blocks itself when asked to. Its comment still says the entries go after the stock
+  `/etc/hosts`; fix that with the first entries.
 - `CONTRIBUTING.md`: for mod authors: what a mod may do, checking a mod (with a
   throwaway key, and on a TV), what reviewers check, how publishing works. `LICENSE`:
   MIT, for the repository's own code; each mod states its own licence.
@@ -545,9 +551,9 @@ out again; what was planned or built, to pick up for 2.0:
 | `MODS_NO_SELFUPDATE=1` | The installed command keeps to its own core, instead of switching to a newer core's command |
 | `MODS_PROFILE` | Replaces root's `~/.profile`, where core puts the command on `PATH` (tests) |
 | `MODS_WEBOS=x.y.z` | Overrides the detected webOS; also an escape hatch past `engines.webos` |
-| `MODS_WEBOS=unknown` | Test-only: acts as if the version can't be read |
+| `MODS_WEBOS=unknown` | Test-only: acts as if the version can't be read (kept, decided 2026-10-14: the only way the tests reach the unknown-webOS branches of install, boot and search) |
 | `MODS_HOSTS_FILE` | Target of the hosts mod (tests) |
-| `MODS_TEST_OFFLINE=1` | Skips the one test that needs internet access |
+| `MODS_TEST_OFFLINE=1` | Skips the one test that needs internet access: curl reaching `https://github.io`, which serves the repository (it checks the TV's curl and CA certificates, not our code; kept, and aimed there rather than at `github.com`, decided 2026-10-14) |
 
 ## Testing
 
@@ -623,8 +629,9 @@ out again; what was planned or built, to pick up for 2.0:
 - TV side: all 166 tests pass on the maintainer's TV with shUnit2 2.1.8 and BusyBox
   1.29.3 (2026-10-13, after step 7 and the hosts mod's stacking fix); one skips there,
   the nyx-cmd fallback, which a real TV never reaches. They pass in CI too, under
-  Ubuntu's BusyBox 1.36.1 (whose tar strips an entry's `b/../` when listing it, so the
-  archive check sees `x`, outside `b/`: refused either way). Breaking any of 32
+  Ubuntu's BusyBox 1.36.1 and, since 2026-10-14, 1.37.0 (whose tar strips an entry's
+  `b/../` when listing it, so the archive check sees `x`, outside `b/`: refused either
+  way). Breaking any of 32
   behaviours of the repository-based command, 5 of the dependency order, 29 of search
   and info, 16 of the step 4 self-update, 7 of the signature check, or 3 of the hosts
   mod's stacking fails one there (the self-update's own `set -e` in its
@@ -665,23 +672,21 @@ out again; what was planned or built, to pick up for 2.0:
   Pages and environments need), to test CI, publishing and Pages before going live as
   `webos-mods`; its `publishing` environment (main only) holds the official key, as
   the live one will (decided 2026-10-13: the beta runs exactly what goes live).
+- CI runs on `ubuntu-26.04`, named rather than `ubuntu-latest`, so the runner doesn't
+  change under it (decided 2026-10-14, after a run there passed first time: BusyBox
+  1.37.0, bash 5.3, shellcheck 0.11, OpenSSL 3.5).
+- To do: all seven steps of "Planned: mod repositories" are done (step 3's `repo`
+  commands and the rest of several repositories are postponed to 2.0); what's left of
+  it is folding the plan into the sections above. Going live, when the maintainer says
+  (remind them): first a thorough review of CONTRIBUTING.md (the maintainer's request,
+  2026-10-14), then `ashway83/webos-mods` set up as the beta was (environment and
+  secret, push, Pages), the one-liner checked from its Pages URL, and
+  `~/webos-mods-signing-key.pem` deleted; the beta repository too once it's no longer
+  needed, which takes the key out of its secrets.
 
 ## Open questions for the maintainer
 
-- Keep `MODS_WEBOS=unknown` (test-only) or drop it together with its three tests?
-  (Suggested 2026-10-13: keep; it's the only way the tests reach the unknown-webOS
-  branches of install, boot and search.)
-- `test_curl_reaches_github_over_https` checks the TV's curl and CA certificates rather
-  than our code; keep it? (Suggested: keep, aimed at `github.io`, which the one-liner
-  and the command use.)
-- Mod repositories are decided (see "Planned: mod repositories"); steps 1 to 5 and 7
-  are done (2026-10-13), and CONTRIBUTING.md; left: folding the plan into the sections
-  above, and going live.
-- The `hosts` mod's `blocklist` is empty; it's only an example so far. Suggested
-  2026-10-13, to check against the TV's DNS traffic first: LG's ad servers
-  (`ad.lgsmartad.com`, `info.lgsmartad.com`, and their `us.`/`eu.` variants), telemetry
-  (`ngfts.lge.com`, `aic-ngfts.lge.com`), the viewing-data partner (`alphonso.tv`); not
-  the update servers, which Homebrew Channel blocks itself when asked to.
+- None at the moment.
 
 ## Working with the maintainer
 
