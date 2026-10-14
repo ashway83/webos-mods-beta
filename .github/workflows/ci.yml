@@ -23,7 +23,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -104,7 +104,7 @@ jobs:
   publish:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: publishing # its SIGNING_KEY secret, for main only
     permissions:
       contents: write
