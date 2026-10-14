@@ -24,10 +24,12 @@ SHUNIT2=$ROOT/tests/shunit2   # shUnit2 2.1.8, shipped unmodified with the repo
 setUp() { new_world; }
 tearDown() { drop_world; }
 
-new_world() {  # a fresh world in $WORLD, with core (and webos-mods in it) copied from this repo
+new_world() {  # a fresh world in $WORLD, with core (and webos-mods in it) copied from this repo,
+               # at version 1.0.0, which the tests count from, whatever version it's at here
     WORLD=$(mktemp -d "${TMPDIR:-/tmp}/webos-mods-test.XXXXXX")
     mkdir -p "$WORLD/repo/mods" "$WORLD/tv/hbc"
     cp -R "$ROOT/mods/core" "$WORLD/repo/mods/"
+    core_at 1.0.0
     MODS_PROFILE=$WORLD/tv/profile   # root's .profile on the fake TV; exported, so that no
     export MODS_PROFILE              # run of core's install script can reach the real one
     TV_WEBOS=6.5.3                 # what the fake TV reports; "unknown" = unreadable
